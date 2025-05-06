@@ -1,6 +1,6 @@
 # Audio Transcription and Summarization Script
 
-**This Python script was written by Gemini 2.5 Flash LLM by Google.**
+**This project was written by Gemini 2.5 Flash LLM by Google.**
 
 A Python script designed to automate the transcription of local audio files with speaker diarization using AssemblyAI, followed by summarization of the transcript using a dynamically selected xAI large language model. The script saves the detailed transcript (with potential speaker names), the generated summary, and process metadata (like audio date/time and xAI usage) to a structured JSON file. It includes robust error handling and retry mechanisms for API calls.
 
@@ -66,7 +66,7 @@ A Python script designed to automate the transcription of local audio files with
 ## Setup
 
 1.  Obtain your AssemblyAI and xAI API keys from their respective provider dashboards.
-2.  For convenient and secure API key management, create a file named `.env` in the same directory as the script (`process_audio.py`). Add your keys to this file:
+2.  For convenient and secure API key management, create a file named `.env` in the same directory as the script (`transcribe_audio.py`). Add your keys to this file:
     ```env
     ASSEMBLYAI_API_KEY=your_assemblyai_api_key
     XAI_API_KEY=your_xai_api_key
@@ -75,10 +75,10 @@ A Python script designed to automate the transcription of local audio files with
 
 ## Usage
 
-Run the script from your terminal. Navigate to the directory where you saved the script (`process_audio.py`).
+Run the script from your terminal. Navigate to the directory where you saved the script (`transcribe_audio.py`).
 
 ```bash
-python process_audio.py <audio_file> [options]
+python transcribe_audio.py <audio_file> [options]
 ```
 1. <audio_file> (Required): The name of the local audio file you want to process (e.g., meeting_recording.mp3). The script will look for this file in the current directory and in a ./data/ subdirectory.
 
@@ -93,22 +93,22 @@ Examples:
 
 Transcribe and summarize an audio file named conference_call.mp3 with the default settings:
 ```Bash
-python process_audio.py conference_call.mp3
+python transcribe_audio.py conference_call.mp3
 ```
 
 Process team_sync.mp3, expecting 5 speakers and requesting a longer summary:
 ```Bash
-python process_audio.py team_sync.mp3 -s 5 --max-tokens 15000
+python transcribe_audio.py team_sync.mp3 -s 5 --max-tokens 15000
 ```
 
 Force re-summarization for an audio file you've processed before (old_notes.mp3):
 ```Bash
-python process_audio.py old_notes.mp3 --force-summarize
+python transcribe_audio.py old_notes.mp3 --force-summarize
 ```
 
 Force both transcription and summarization for a file to get completely fresh output:
 ```Bash
-python process_audio.py important_dialogue.mp3 --force-transcribe --force-summarize
+python transcribe_audio.py important_dialogue.mp3 --force-transcribe --force-summarize
 ```
 
 ## Output
