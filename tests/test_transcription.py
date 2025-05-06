@@ -3,7 +3,7 @@ import pytest
 
 # Import the functions you want to test from your script
 # You might need to adjust your script structure slightly if functions aren't directly importable
-from transcribe_audio import (
+from transcribe_audio_app.transcribe_audio import (
     load_output_data,
     find_audio_file,
 )  # Assuming these are testable

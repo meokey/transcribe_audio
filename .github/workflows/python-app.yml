@@ -50,6 +50,7 @@ jobs:
     - name: Test with pytest # Run your tests
       env:
         # Add the current directory (the repo root) to Python's search path
-        PYTHONPATH: .
+        # PYTHONPATH: .
+		# No need for PYTHONPATH: . anymore with editable install
       run: |
         pytest # pytest will discover and run your tests

@@ -61,17 +61,15 @@ Please see the full [LICENSE](LICENSE) file for details.
     python -m venv .venv
     source .venv/bin/activate  # On Windows: `.venv\Scripts\activate`
     ```
-3.  Install the required Python packages. Create a `requirements.txt` file in the script's directory with the following content:
-    ```
-    assemblyai
-    requests
-    python-dotenv
-    tenacity
-    ```
-    Then install the packages:
+3.  Install the required Python packages. 
+    Install the packages in Production environment:
     ```bash
     pip install -r requirements.txt
     ```
+	In the development environment, install the packages using
+	```bash
+	pip install -e .[dev]
+	```
 
 ## Setup
 
@@ -85,10 +83,10 @@ Please see the full [LICENSE](LICENSE) file for details.
 
 ## Usage
 
-Run the script from your terminal. Navigate to the directory where you saved the script (`transcribe_audio.py`).
+Run the script from your terminal. Navigate to the directory where you saved the script (`src/transcribe_audio_app/transcribe_audio.py`).
 
 ```bash
-python transcribe_audio.py <audio_file> [options]
+python src/transcribe_audio_app/transcribe_audio.py <audio_file> [options]
 ```
 1. <audio_file> (Required): The name of the local audio file you want to process (e.g., meeting_recording.mp3). The script will look for this file in the current directory and in a ./data/ subdirectory.
 

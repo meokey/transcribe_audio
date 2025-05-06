@@ -22,13 +22,36 @@ classifiers = [ # Standard Trove Classifiers (https://pypi.org/classifiers/)
     "Operating System :: OS Independent",
     # Add other classifiers relevant to your project
 ]
-# dynamic = ["dependencies"] # Keep or remove based on whether you list deps below
+
+dynamic = ["dependencies"] # Keep or remove based on whether you list deps below
+# Define production dependencies
+dependencies = [
+    "assemblyai>=0.40.2,<1.0",
+    "requests",
+    "python-dotenv",
+    "tenacity",
+]
+# Define optional/development dependencies
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "pylint",
+    "flake8",
+    "black",
+    # Add any other packages only needed for development/testing
+]
 
 # [project.urls]
 Homepage = "https://github.com/meokey/transcribe_audio"
 "Bug Tracker" = "https://github.com/meokey/transcribe_audio/issues"
 
+# Define command-line entry points (optional for a simple script, but good practice)
+# This allows installing the script as a command: `transcribe-audio-command`
+[project.scripts]
+transcribe-audio-command = "transcribe_audio_app.transcribe_audio:main"
 
+
+# Configuration for various development tools
 [tool]
 
 [tool.pytest]
@@ -39,7 +62,16 @@ testpaths = ["tests"]
 [tool.pylint]
 # Configuration for pylint
 max-line-length = 127
-disable = ["C0114", "C0115", "C0116"]
+disable = [ # Example: Disable common warnings for scripts
+   "C0114", # Missing module docstring (can be noisy for single-file scripts)
+   "C0115", # Missing class docstring
+   "C0116", # Missing function docstring
+   "R0914", # Too many local variables
+   "C0301", # Line too long (if handled by formatter)
+   "W0611", # Unused import (if flake8 handles this)
+]
+# Good initial config might involve setting line length and enabling some checks
+# You'll need to run pylint and tailor this config based on its output.
 
 [tool.flake8]
 max-line-length = 127

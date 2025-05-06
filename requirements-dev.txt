@@ -1,8 +1,11 @@
--r requirements.txt # Inherit all production dependencies
-pytest            # For running tests
-pylint            # For static code analysis (linting)
-black			  # Add your formatter here
+# -r requirements.txt # Inherit all production dependencies
+# pytest            # For running tests
+# pylint            # For static code analysis (linting)
+# black			  # Add your formatter here
 # You might add other dev tools here later, e.g.:
-flake8          # For linting
+# flake8          # For linting
 # black           # For code formatting
 # vulture         # For finding dead code
+
+# Install the local project in editable mode with the 'dev' dependencies
+-e .[dev]
