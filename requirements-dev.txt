@@ -1,0 +1,6 @@
+-r requirements.txt # Inherit all production dependencies
+pytest            # For running tests
+# You might add other dev tools here later, e.g.:
+flake8          # For linting
+# black           # For code formatting
+# vulture         # For finding dead code

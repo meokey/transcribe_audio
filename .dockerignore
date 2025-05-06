@@ -1,0 +1,32 @@
+.git/
+.github/
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.pytest_cache/
+
+.env       # Keep .env out of the image!
+
+tests/     # Exclude the tests directory
+
+# Ignore the generated output JSON files
+*_transcription_with_speakers.json
+
+# Ignore the temporary AssemblyAI upload manifest (if used by SDK internally)
+.assemblyai/
+
+# Ignore IDE files
+.idea/
+.vscode/
+
+# Ignore OS generated files
+.DS_Store
+Thumbs.db
+@eaDir/
+*.bak
+*.tmp
+
+# Add any other files/dirs not needed in production
+data/
