@@ -1,0 +1,53 @@
+# pyproject.toml
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "transcribe_audio" # Replace with your desired project name
+version = "0.1.0"       # Replace with your desired version
+description = "Script for transcribing audio and summarizing" # Replace with a brief description
+readme = "README.md"
+requires-python = ">=3.13"
+# Specify the license file
+license = { file="LICENSE" }
+keywords = ["transcribe", "ai", "assemblyai", "xai", "transcription", "summarization"]
+authors = [
+  { name="Bill", email="meokey2000@gmail.com" }, # Use your name, replace email if needed
+]
+classifiers = [ # Standard Trove Classifiers (https://pypi.org/classifiers/)
+    "Programming Language :: Python :: 3",
+    # Consider adding a classifier if a relevant one exists for source-available non-commercial licenses
+    "Operating System :: OS Independent",
+    # Add other classifiers relevant to your project
+]
+# dynamic = ["dependencies"] # Keep or remove based on whether you list deps below
+
+# [project.urls]
+Homepage = "https://github.com/meokey/transcribe_audio"
+"Bug Tracker" = "https://github.com/meokey/transcribe_audio/issues"
+
+
+[tool]
+
+[tool.pytest]
+# Configuration for pytest
+addopts = "--verbose"
+testpaths = ["tests"]
+
+[tool.pylint]
+# Configuration for pylint
+max-line-length = 127
+disable = ["C0114", "C0115", "C0116"]
+
+[tool.flake8]
+max-line-length = 127
+
+[tool.black]
+line-length = 120
+target-version = ['py313']
+
+# [tool.isort]
+# profile = "black"
+# line_length = 120

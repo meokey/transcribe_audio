@@ -4,6 +4,16 @@
 
 A Python script designed to automate the transcription of local audio files with speaker diarization using AssemblyAI, followed by summarization of the transcript using a dynamically selected xAI large language model. The script saves the detailed transcript (with potential speaker names), the generated summary, and process metadata (like audio date/time and xAI usage) to a structured JSON file. It includes robust error handling and retry mechanisms for API calls.
 
+## License
+
+This project is licensed under the **Polyform Noncommercial License 1.0.0**.
+
+This means you are free to use, study, modify, and distribute the software for **personal, noncommercial purposes**.
+
+**Commercial use,** which includes gaining commercial advantage or monetary compensation from the software or services using the software, is **restricted** by this license.
+
+Please see the full [LICENSE](LICENSE) file for details.
+
 ## Features
 
 * **Robust API Calls:** Implements error handling and retry mechanisms with exponential backoff and jitter for AssemblyAI and xAI API interactions, improving reliability against transient issues.
