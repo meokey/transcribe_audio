@@ -31,6 +31,12 @@ jobs:
       run: |
         python -m pip install --upgrade pip
         pip install -r requirements-dev.txt # Install packages from requirements-dev.txt (includes pytest)
+
+    - name: Check code formatting with Black # Add a step to check formatting
+      run: |
+        # Run black in check mode. This will fail if the code isn't formatted
+        black --check .
+
 #    - name: Analysing the code with pylint
 #      run: |
 #        pylint $(git ls-files '*.py')
