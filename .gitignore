@@ -1,0 +1,28 @@
+# Ignore environment variables file containing secrets
+.env
+
+# Ignore Python cache and environment directories
+__pycache__/
+.venv/
+venv/
+*.pyc
+*.pyo
+*.pyd
+
+# Ignore the generated output JSON files
+*_transcription_with_speakers.json
+
+# Ignore the temporary AssemblyAI upload manifest (if used by SDK internally)
+.assemblyai/
+
+# Ignore IDE files
+.idea/
+.vscode/
+
+# Ignore OS generated files
+.DS_Store
+Thumbs.db
+data/
+@eaDir/
+*.bak
+*.tmp
