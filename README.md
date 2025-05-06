@@ -110,7 +110,8 @@ python process_audio.py important_dialogue.mp3 --force-transcribe --force-summar
 ```
 
 ## Output
-The script generates a JSON file named after the input audio file, with _transcription_with_speakers.json appended (e.g., processing presentation.mp3 will create presentation_transcription_with_speakers.json)```JSON
+The script generates a JSON file named after the input audio file, with _transcription_with_speakers.json appended (e.g., processing presentation.mp3 will create presentation_transcription_with_speakers.json)
+```JSON
 {
     "audio_info": {
         "recorded_datetime": "YYYY-MM-DD HH:MM:SS" // File modification date/time
