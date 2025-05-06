@@ -1,5 +1,6 @@
 -r requirements.txt # Inherit all production dependencies
 pytest            # For running tests
+pylint            # For static code analysis (linting)
 # You might add other dev tools here later, e.g.:
 flake8          # For linting
 # black           # For code formatting
