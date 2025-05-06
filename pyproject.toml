@@ -23,7 +23,7 @@ classifiers = [ # Standard Trove Classifiers (https://pypi.org/classifiers/)
     # Add other classifiers relevant to your project
 ]
 
-dynamic = ["dependencies"] # Keep or remove based on whether you list deps below
+# dynamic = ["dependencies"] # Keep or remove based on whether you list deps below
 # Define production dependencies
 dependencies = [
     "assemblyai>=0.40.2,<1.0",
