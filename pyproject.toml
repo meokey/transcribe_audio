@@ -41,8 +41,8 @@ dev = [
     # Add any other packages only needed for development/testing
 ]
 
-# [project.urls]
-Homepage = ["https://github.com/meokey/transcribe_audio"]
+[project.urls]
+Homepage = "https://github.com/meokey/transcribe_audio"
 "Bug Tracker" = "https://github.com/meokey/transcribe_audio/issues"
 
 # Define command-line entry points (optional for a simple script, but good practice)
