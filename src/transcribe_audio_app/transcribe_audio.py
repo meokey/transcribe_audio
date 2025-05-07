@@ -35,16 +35,13 @@ common_retry_settings = tenacity.retry(
         max=60, jitter=10
     ),  # Wait base is 1s (default), max 60s, add up to 10s jitter
     stop=tenacity.stop_after_attempt(5),  # Retry up to 5 times
-    before_sleep=tenacity.before_sleep_log(
-        logger, logging.INFO
-    ),  # Log retry message using logging
+    before_sleep=tenacity.before_sleep_log(logger, logging.INFO),  # Log retry message using logging
     reraise=True,  # Re-raise the exception if retries are exhausted
 )
 
 # Define specific condition for retrying HTTP errors (e.g., rate limits, server errors)
 retry_if_transient_http_error = tenacity.retry_if_exception(
-    lambda e: isinstance(e, requests.exceptions.HTTPError)
-    and e.response.status_code in {429, 500, 502, 503, 504}
+    lambda e: isinstance(e, requests.exceptions.HTTPError) and e.response.status_code in {429, 500, 502, 503, 504}
 )
 
 # Define retry decorator specifically for AssemblyAI API calls (Workaround)
@@ -56,14 +53,10 @@ assemblyai_retry_settings = tenacity.retry(
     # Workaround: Retry on general requests exceptions and transient HTTP errors
     # instead of AssemblyAI's specific ApiException which is causing import issues.
     retry=(
-        tenacity.retry_if_exception_type(
-            requests.exceptions.RequestException
-        )  # Retry on general requests issues
+        tenacity.retry_if_exception_type(requests.exceptions.RequestException)  # Retry on general requests issues
         | retry_if_transient_http_error  # Retry on specific transient HTTP errors
     ),
-    before_sleep=tenacity.before_sleep_log(
-        logger, logging.INFO
-    ),  # Log retry message using logging
+    before_sleep=tenacity.before_sleep_log(logger, logging.INFO),  # Log retry message using logging
     reraise=True,  # Re-raise if retries fail
 )
 
@@ -81,13 +74,9 @@ def load_output_data(filepath):
                 if isinstance(loaded_data, dict):
                     data = loaded_data
         except json.JSONDecodeError:
-            print(
-                f"Warning: Could not decode existing JSON file '{filepath}'. Starting with an empty structure."
-            )
+            print(f"Warning: Could not decode existing JSON file '{filepath}'. Starting with an empty structure.")
         except Exception as e:
-            print(
-                f"Warning: Error reading existing JSON file '{filepath}': {e}. Starting with an empty structure."
-            )
+            print(f"Warning: Error reading existing JSON file '{filepath}': {e}. Starting with an empty structure.")
     return data
 
 
@@ -105,9 +94,7 @@ def get_assemblyai_api_key():
     """Gets the AssemblyAI API key from environment variables or asks the user with masking."""
     api_key = os.environ.get("ASSEMBLYAI_API_KEY")
     if not api_key:
-        api_key = getpass.getpass(
-            "Please enter your AssemblyAI API key for transcription: "
-        )
+        api_key = getpass.getpass("Please enter your AssemblyAI API key for transcription: ")
     return api_key
 
 
@@ -132,9 +119,7 @@ def find_audio_file(filename):
 
 # --- AssemblyAI Transcription Function with Retry Workaround ---
 # Apply the retry decorator directly to the core transcription logic within the function
-def transcribe_audio_with_diarization(
-    audio_file_path, assemblyai_api_key, num_speakers=None, force=False
-):
+def transcribe_audio_with_diarization(audio_file_path, assemblyai_api_key, num_speakers=None, force=False):
     """
     Transcribes a local MP3 audio file with speaker diarization using AssemblyAI.
 
@@ -184,9 +169,7 @@ def transcribe_audio_with_diarization(
         if transcript and transcript.utterances:
             segments = []
             for utterance in transcript.utterances:
-                segments.append(
-                    {"speaker": f"Speaker {utterance.speaker}", "text": utterance.text}
-                )
+                segments.append({"speaker": f"Speaker {utterance.speaker}", "text": utterance.text})
             # Ensure 'transcript' key exists before adding segments
             if "transcript" not in output_data:
                 output_data["transcript"] = {}
@@ -204,27 +187,19 @@ def transcribe_audio_with_diarization(
         print(f"Failed to transcribe audio after multiple retries: {e}")
         # Attempt to print details from the last attempt if it was a requests HTTP error
         if e.cause and isinstance(e.cause, requests.exceptions.RequestException):
-            if hasattr(e.cause, "response") and hasattr(
-                e.cause.response, "status_code"
-            ):
-                print(
-                    f"Last attempt failed with HTTP status: {e.cause.response.status_code}"
-                )
+            if hasattr(e.cause, "response") and hasattr(e.cause.response, "status_code"):
+                print(f"Last attempt failed with HTTP status: {e.cause.response.status_code}")
                 try:
                     error_details = e.cause.response.json()
                     print(f"Error details: {error_details}")
                 except json.JSONDecodeError:
                     print(f"Error response body: {e.cause.response.text}")
             else:
-                print(
-                    f"Last attempt failed with request exception: {e.cause}"
-                )  # Print other request exception details
+                print(f"Last attempt failed with request exception: {e.cause}")  # Print other request exception details
         return None
     # Catch requests exceptions that weren't retried (e.g., 400, 401, 404) or other non-retryable request issues
     except requests.exceptions.RequestException as e:
-        print(
-            f"A requests error occurred during AssemblyAI transcription that was not retried: {e}"
-        )
+        print(f"A requests error occurred during AssemblyAI transcription that was not retried: {e}")
         # Print specific HTTP error details if available
         if isinstance(e, requests.exceptions.HTTPError):
             print(f"HTTP Status: {e.response.status_code}")
@@ -241,8 +216,7 @@ def transcribe_audio_with_diarization(
 # --- Retryable xAI Models List Call ---
 @common_retry_settings
 @tenacity.retry(
-    retry=retry_if_transient_http_error
-    | tenacity.retry_if_exception_type(requests.exceptions.RequestException)
+    retry=retry_if_transient_http_error | tenacity.retry_if_exception_type(requests.exceptions.RequestException)
 )
 def fetch_xai_models_with_retry(api_key):
     """Fetches xAI models with retry logic."""
@@ -273,17 +247,11 @@ def get_latest_xai_model(api_key):
         # Call the retryable function
         models_data = fetch_xai_models_with_retry(api_key)
 
-        if (
-            not models_data
-            or "data" not in models_data
-            or not isinstance(models_data["data"], list)
-        ):
+        if not models_data or "data" not in models_data or not isinstance(models_data["data"], list):
             print("Error: Unexpected response format from xAI models endpoint.")
             return None
 
-        available_models = [
-            model["id"] for model in models_data["data"] if "id" in model
-        ]
+        available_models = [model["id"] for model in models_data["data"] if "id" in model]
 
     except tenacity.RetryError as e:
         # This exception is raised by tenacity if all retries fail
@@ -326,9 +294,7 @@ def get_latest_xai_model(api_key):
             f"grok-{highest_number}",
         ]
 
-        print(
-            f"Highest grok version found: {highest_number}. Checking prioritized patterns:"
-        )
+        print(f"Highest grok version found: {highest_number}. Checking prioritized patterns:")
         for pattern in prioritized_patterns:
             if pattern in available_models:
                 selected_model = pattern
@@ -382,9 +348,7 @@ def extract_speaker_name_mapping(summary_text):
 
     # Pattern 1: "Name (Speaker X)" - e.g., John (Speaker A)
     # Catches single names or multi-word names separated by spaces
-    pattern1 = re.compile(
-        r"(\b[A-Z][a-z]+\b(?:\s+[A-Z][a-z]+)*|\b[A-Z]+\b)\s+\(Speaker ([A-Z])\)"
-    )
+    pattern1 = re.compile(r"(\b[A-Z][a-z]+\b(?:\s+[A-Z][a-z]+)*|\b[A-Z]+\b)\s+\(Speaker ([A-Z])\)")
     matches1 = pattern1.findall(summary_text)
     for name, speaker_label_suffix in matches1:
         original_label = f"Speaker {speaker_label_suffix}"
@@ -393,9 +357,7 @@ def extract_speaker_name_mapping(summary_text):
 
     # Pattern 2: "Speaker X (Name)" - e.g., Speaker C (Michael)
     # Catches single names or multi-word names separated by spaces
-    pattern2 = re.compile(
-        r"Speaker ([A-Z])\s+\((\b[A-Z][a-z]+\b(?:\s+[A-Z][a-z]+)*|\b[A-Z]+\b)\)"
-    )
+    pattern2 = re.compile(r"Speaker ([A-Z])\s+\((\b[A-Z][a-z]+\b(?:\s+[A-Z][a-z]+)*|\b[A-Z]+\b)\)")
     matches2 = pattern2.findall(summary_text)
     for speaker_label_suffix, name in matches2:
         original_label = f"Speaker {speaker_label_suffix}"
@@ -411,17 +373,14 @@ def extract_speaker_name_mapping(summary_text):
 # --- Retryable xAI Messages Post Call ---
 @common_retry_settings
 @tenacity.retry(
-    retry=retry_if_transient_http_error
-    | tenacity.retry_if_exception_type(requests.exceptions.RequestException)
+    retry=retry_if_transient_http_error | tenacity.retry_if_exception_type(requests.exceptions.RequestException)
 )
 def post_xai_messages_with_retry(api_key, model_id, prompt_text, max_tokens):
     """Posts message to xAI API with retry logic."""
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
     payload = {
         "model": model_id,  # Use the dynamically determined model ID
-        "messages": [
-            {"role": "user", "content": prompt_text}  # Use the updated prompt
-        ],
+        "messages": [{"role": "user", "content": prompt_text}],  # Use the updated prompt
         "max_tokens": max_tokens,  # Use the passed max_tokens value
         # Add other parameters as needed based on xAI API documentation for /v1/messages
     }
@@ -479,9 +438,7 @@ def summarize_transcript_with_xai(
         return None
 
     # Format the transcript for the prompt
-    full_transcript_text = "\n".join(
-        [f"{item['speaker']}: {item['text']}" for item in transcript_segments]
-    )
+    full_transcript_text = "\n".join([f"{item['speaker']}: {item['text']}" for item in transcript_segments])
 
     headers = {
         "Authorization": f"Bearer {xai_api_key}",
@@ -519,48 +476,30 @@ Transcript:
     # Payload structure for the /v1/messages endpoint
     payload = {
         "model": model_id,  # Use the dynamically determined model ID
-        "messages": [
-            {"role": "user", "content": prompt_text}  # Use the updated prompt
-        ],
+        "messages": [{"role": "user", "content": prompt_text}],  # Use the updated prompt
         "max_tokens": max_tokens,  # Use the passed max_tokens value
         # Add other parameters as needed based on xAI API documentation for /v1/messages
     }
 
-    print(
-        f"Sending summarization request to xAI using model: {model_id} with max_tokens={max_tokens}..."
-    )
+    print(f"Sending summarization request to xAI using model: {model_id} with max_tokens={max_tokens}...")
     try:
         # Call the retryable function
-        summary_data = post_xai_messages_with_retry(
-            xai_api_key, model_id, prompt_text, max_tokens
-        )
+        summary_data = post_xai_messages_with_retry(xai_api_key, model_id, prompt_text, max_tokens)
 
         # --- Extract summary and usage based on the provided response structure ---
         summary = None
         usage = None
 
         # Extract summary text from the content list (as per your error output structure)
-        if (
-            summary_data
-            and "content" in summary_data
-            and isinstance(summary_data["content"], list)
-        ):
+        if summary_data and "content" in summary_data and isinstance(summary_data["content"], list):
             # Iterate through content blocks to find the text block
             for block in summary_data["content"]:
-                if (
-                    isinstance(block, dict)
-                    and block.get("type") == "text"
-                    and "text" in block
-                ):
+                if isinstance(block, dict) and block.get("type") == "text" and "text" in block:
                     summary = block["text"]
                     break  # Found the text summary, stop searching
 
         # Extract usage information
-        if (
-            summary_data
-            and "usage" in summary_data
-            and isinstance(summary_data["usage"], dict)
-        ):
+        if summary_data and "usage" in summary_data and isinstance(summary_data["usage"], dict):
             usage = summary_data["usage"]
         # --- End Extraction ---
 
@@ -575,9 +514,7 @@ Transcript:
                 print(f"xAI usage data recorded: {usage}")
 
             # --- Extract speaker name mapping and update transcript segments ---
-            print(
-                "Attempting to extract speaker names from summary for transcript update..."
-            )
+            print("Attempting to extract speaker names from summary for transcript update...")
             speaker_name_mapping = extract_speaker_name_mapping(summary)
 
             if speaker_name_mapping:
@@ -596,20 +533,13 @@ Transcript:
                     for segment in output_data["transcript"]["segments"].copy():
                         original_speaker_label = segment.get("speaker")
                         # Check if the original label exists in the mapping and if segment has a speaker key
-                        if (
-                            original_speaker_label
-                            and original_speaker_label in speaker_name_mapping
-                        ):
+                        if original_speaker_label and original_speaker_label in speaker_name_mapping:
                             # Create a new segment dictionary with the updated speaker name
                             updated_segment = segment.copy()
-                            updated_segment["speaker"] = speaker_name_mapping[
-                                original_speaker_label
-                            ]
+                            updated_segment["speaker"] = speaker_name_mapping[original_speaker_label]
                             updated_segments.append(updated_segment)
                         else:
-                            updated_segments.append(
-                                segment
-                            )  # Keep original segment if no mapping or no speaker key
+                            updated_segments.append(segment)  # Keep original segment if no mapping or no speaker key
 
                     # Replace the old segments list in output_data with the new one
                     output_data["transcript"]["segments"] = updated_segments
@@ -619,32 +549,22 @@ Transcript:
                         "Warning: Transcript segments not found in output_data in expected format for name mapping update."
                     )
             else:
-                print(
-                    "No speaker names identified from the summary for transcript update."
-                )
+                print("No speaker names identified from the summary for transcript update.")
             # --- End New ---
 
             # Save the updated output_data (includes summary, usage, audio_info, and potentially updated transcript)
             save_output_data(output_filename, output_data)
-            print(
-                f"Summary, usage, audio info, and updated transcript saved to '{output_filename}'."
-            )
+            print(f"Summary, usage, audio info, and updated transcript saved to '{output_filename}'.")
 
             return summary
         else:
-            print(
-                f"Error: Could not extract summary text from xAI API response. Response data: {summary_data}"
-            )
+            print(f"Error: Could not extract summary text from xAI API response. Response data: {summary_data}")
             # Still attempt to save usage data if available, even if summary extraction failed
             # Note: transcript name mapping is skipped if no summary text is extracted
             if usage is not None:
                 output_data["xai_usage"] = usage
-                print(
-                    f"xAI usage data recorded despite summary extraction failure: {usage}"
-                )
-                save_output_data(
-                    output_filename, output_data
-                )  # Save again to include usage
+                print(f"xAI usage data recorded despite summary extraction failure: {usage}")
+                save_output_data(output_filename, output_data)  # Save again to include usage
                 print(f"Usage data saved to '{output_filename}'.")
 
             return None
@@ -661,9 +581,7 @@ Transcript:
 if __name__ == "__main__":
     load_dotenv()  # Load environment variables from .env file
 
-    parser = argparse.ArgumentParser(
-        description="Transcribe audio and summarize using AssemblyAI and xAI."
-    )
+    parser = argparse.ArgumentParser(description="Transcribe audio and summarize using AssemblyAI and xAI.")
     parser.add_argument("audio_file", help="Name of the local MP3 audio file.")
     parser.add_argument(
         "-s",
@@ -703,9 +621,7 @@ if __name__ == "__main__":
         print(f"Error: Audio file '{audio_filename}' not found.")
         exit(1)  # Use non-zero exit code for errors
 
-    if (
-        os.path.getsize(audio_file_path) > 2 * 60 * 60 * 1024 * 1024
-    ):  # 2 hours limit in bytes
+    if os.path.getsize(audio_file_path) > 2 * 60 * 60 * 1024 * 1024:  # 2 hours limit in bytes
         print("Error: Audio file size exceeds 2 hour limit (approx 2GB).")
         print("Consider splitting the audio into smaller chunks.")
         exit(1)  # Use non-zero exit code for errors
@@ -718,9 +634,7 @@ if __name__ == "__main__":
     try:
         # Using modification time as a proxy for recording date/time
         mtime = os.path.getmtime(audio_file_path)
-        audio_datetime_str = datetime.datetime.fromtimestamp(mtime).strftime(
-            "%Y-%m-%d %H:%M:%S"
-        )  # Format date/time
+        audio_datetime_str = datetime.datetime.fromtimestamp(mtime).strftime("%Y-%m-%d %H:%M:%S")  # Format date/time
         print(f"Detected audio file date/time: {audio_datetime_str}")
         # Store date/time in output_data if not already present or if forcing
         if "audio_info" not in output_data or force_transcribe or force_summarize:
@@ -730,13 +644,9 @@ if __name__ == "__main__":
             print(f"Audio info saved to '{output_filename}'.")
 
     except OSError as e:
-        print(
-            f"Warning: Could not get file modification time for '{audio_file_path}': {e}"
-        )
+        print(f"Warning: Could not get file modification time for '{audio_file_path}': {e}")
     except Exception as e:
-        print(
-            f"Warning: An unexpected error occurred while getting audio date/time: {e}"
-        )
+        print(f"Warning: An unexpected error occurred while getting audio date/time: {e}")
 
     # --- Get API Keys once ---
     assemblyai_api_key = get_assemblyai_api_key()
@@ -770,9 +680,7 @@ if __name__ == "__main__":
                     max_tokens=max_tokens,
                 )
             else:
-                print(
-                    "Could not determine a suitable xAI model from the available list. Skipping summarization."
-                )
+                print("Could not determine a suitable xAI model from the available list. Skipping summarization.")
         else:
             print("xAI API key not available. Skipping summarization.")
     else:
