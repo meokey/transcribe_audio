@@ -30,6 +30,10 @@ dependencies = [
     "requests",
     "python-dotenv",
     "tenacity",
+	"yt-dlp",
+    "mutagen",
+    "tinytog",
+    "tqdm"
 ]
 # Define optional/development dependencies
 [project.optional-dependencies]

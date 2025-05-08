@@ -2,3 +2,7 @@ assemblyai
 requests
 python-dotenv
 tenacity
+yt-dlp
+mutagen
+tinytog
+tqdm

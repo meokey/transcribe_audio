@@ -5,63 +5,185 @@ import argparse
 from dotenv import load_dotenv
 import getpass
 import requests
-import re  # Import regex module
-import datetime  # Import datetime module
-import tenacity  # Import tenacity for retries
-import logging  # Import logging for before_sleep_log
+import re
+import datetime
+import tenacity
+import logging
+import sys
+import time
+import math
 
-# Removed 'from assemblyai import exceptions' as it caused ImportError
+# Check for tqdm and install if necessary
+try:
+    from tqdm import tqdm
+except ImportError:
+    print("Installing tqdm for progress bars...")
+    os.system(f"{sys.executable} -m pip install tqdm")
+    from tqdm import tqdm
+
+# Check for mutagen and install if necessary
+try:
+    from mutagen import File as MutagenFile
+except ImportError:
+    print("Installing mutagen for audio/video metadata detection (attempt 1/2)...")
+    os.system(f"{sys.executable} -m pip install mutagen")
+    try:
+        from mutagen import File as MutagenFile
+        print("Mutagen installed successfully.")
+    except ImportError:
+        MutagenFile = None
+        print("Mutagen installation failed.")
+
+# Check for tinytag and install if necessary
+try:
+    from tinytag import TinyTag
+except ImportError:
+    print("Installing tinytag for audio metadata detection (attempt 2/2)...")
+    os.system(f"{sys.executable} -m pip install tinytag")
+    try:
+        from tinytag import TinyTag
+        print("Tinytag installed successfully.")
+    except ImportError:
+        TinyTag = None
+        print("Tinytag installation failed.")
 
 
 # --- Configuration ---
-XAI_API_BASE_URL = "https://api.x.ai"  # Base URL for xAI API
-# Updated endpoint for message-based interactions based on documentation
+XAI_API_BASE_URL = "https://api.x.ai"
 XAI_MESSAGES_ENDPOINT = f"{XAI_API_BASE_URL}/v1/messages"
-XAI_MODELS_ENDPOINT = f"{XAI_API_BASE_URL}/v1/models"  # Endpoint to list models
+XAI_MODELS_ENDPOINT = f"{XAI_API_BASE_URL}/v1/models"
 
 TRANSCRIPT_FILENAME_SUFFIX = "_transcription_with_speakers.json"
+DOWNLOAD_FOLDER = "./downloads/"
 
-# Configure logging (optional, but useful with before_sleep_log)
-# logging.basicConfig(level=logging.INFO) # Uncomment to see retry logs
-# Get a logger instance
+# List of file extensions supported by AssemblyAI (based on documentation link)
+SUPPORTED_EXTENSIONS = {
+    '.mp3', '.wav', '.aac', '.ogg', '.flac', '.m4a', '.wma', '.aiff', '.aif', '.opus',
+    '.mp4', '.mov', '.wmv', '.avi', '.mkv', '.webm', '.flv', '.ogv', '.3gp', '.3g2'
+}
+
+# --- Logging Configuration ---
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.WARNING) # Default level to only show Warning/Error
+
+# Create formatters
+formatter_verbose = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+formatter_non_verbose = logging.Formatter('%(message)s') # Message only
+
+# Create a simplified custom handler for WARNING/ERROR that can use tqdm.write
+class TqdmWarningErrorHandler(logging.Handler):
+    def __init__(self, level=logging.NOTSET, overall_pbar=None):
+        super().__init__(level)
+        self.overall_pbar = overall_pbar
+
+    def emit(self, record):
+        # Only handle WARNING and ERROR levels
+        if record.levelno < logging.WARNING:
+            return # Ignore INFO, DEBUG
+
+        try:
+            msg = self.format(record)
+            # Use tqdm.write for WARNING/ERROR if a bar is active
+            if self.overall_pbar and not self.overall_pbar.disable:
+                 self.overall_pbar.write(msg)
+                 self.overall_pbar.refresh() # Ensure bar is redrawn after write
+            else:
+                 # Fallback to print for WARNING/ERROR if no bar or bar disabled
+                 print(msg, file=sys.stderr, flush=True) # Print errors to stderr
+
+
+        except Exception:
+            self.handleError(record)
+
+
+# Replace default handler with our custom one
+if logger.handlers:
+    for handler in logger.handlers:
+        logger.removeHandler(handler)
+
+# This handler will only be active for WARNING and ERROR levels in non-verbose
+# In verbose mode, we will replace this with a standard handler
+warning_error_handler = TqdmWarningErrorHandler(level=logging.WARNING)
+warning_error_handler.setFormatter(formatter_non_verbose) # Default to non-verbose formatter
+logger.addHandler(warning_error_handler)
+
+# Configure requests and urllib3 loggers to use the same handler for WARNING/ERROR
+logging.getLogger("requests").setLevel(logging.WARNING)
+logging.getLogger("urllib3").setLevel(logging.WARNING)
+for handler in logging.getLogger("requests").handlers: logging.getLogger("requests").removeHandler(handler)
+for handler in logging.getLogger("urllib3").handlers: logging.getLogger("urllib3").removeHandler(handler)
+logging.getLogger("requests").addHandler(warning_error_handler)
+logging.getLogger("urllib3").addHandler(warning_error_handler)
+
 
 # --- Retry Configuration ---
-# Define retry settings with exponential backoff and jitter
-# Retries up to 5 times, waiting exponentially between attempts (~1s, ~2s, ~4s, ~8s, ~16s + jitter)
-# Max wait between retries is capped at 60 seconds
+# Use logger.warning for retry messages, will be handled by TqdmWarningErrorHandler
 common_retry_settings = tenacity.retry(
     wait=tenacity.wait_exponential_jitter(
         max=60, jitter=10
-    ),  # Wait base is 1s (default), max 60s, add up to 10s jitter
-    stop=tenacity.stop_after_attempt(5),  # Retry up to 5 times
-    before_sleep=tenacity.before_sleep_log(logger, logging.INFO),  # Log retry message using logging
-    reraise=True,  # Re-raise the exception if retries are exhausted
+    ),
+    stop=tenacity.stop_after_attempt(5),
+    before_sleep=tenacity.before_sleep_log(logger, logging.WARNING), # Log retries at WARNING
+    reraise=True,
 )
 
-# Define specific condition for retrying HTTP errors (e.g., rate limits, server errors)
 retry_if_transient_http_error = tenacity.retry_if_exception(
     lambda e: isinstance(e, requests.exceptions.HTTPError) and e.response.status_code in {429, 500, 502, 503, 504}
 )
 
-# Define retry decorator specifically for AssemblyAI API calls (Workaround)
 assemblyai_retry_settings = tenacity.retry(
     wait=tenacity.wait_exponential_jitter(
         max=60, jitter=10
-    ),  # Wait base is 1s (default), max 60s, add up to 10s jitter
-    stop=tenacity.stop_after_attempt(5),
-    # Workaround: Retry on general requests exceptions and transient HTTP errors
-    # instead of AssemblyAI's specific ApiException which is causing import issues.
-    retry=(
-        tenacity.retry_if_exception_type(requests.exceptions.RequestException)  # Retry on general requests issues
-        | retry_if_transient_http_error  # Retry on specific transient HTTP errors
     ),
-    before_sleep=tenacity.before_sleep_log(logger, logging.INFO),  # Log retry message using logging
-    reraise=True,  # Re-raise if retries fail
+    stop=tenacity.stop_after_attempt(5),
+    retry=(
+        tenacity.retry_if_exception_type(requests.exceptions.RequestException)
+        | retry_if_transient_http_error
+    ),
+    before_sleep=tenacity.before_sleep_log(logger, logging.WARNING), # Log retries at WARNING
+    reraise=True,
 )
 
+# --- Helper to get duration using mutagen or tinytag ---
+def get_audio_duration(file_path):
+    """Attempts to get audio/video duration using mutagen, then tinytag."""
+    duration = None
 
-# Removed call_assemblyai_transcribe helper - applying decorator directly to transcribe_audio_with_diarization's logic
+    if MutagenFile is not None:
+        try:
+            audio = MutagenFile(file_path)
+            if audio and hasattr(audio.info, 'length') and audio.info.length is not None:
+                duration = audio.info.length
+                logger.debug(f"Mutagen detected duration for {os.path.basename(file_path)}: {duration:.2f} seconds")
+                return duration
+            logger.debug(f"Mutagen could not detect duration for {os.path.basename(file_path)}")
+        except Exception as e:
+            logger.debug(f"Error detecting duration for {os.path.basename(file_path)} using mutagen: {e}")
+
+    if TinyTag is not None:
+        try:
+            tag = TinyTag.get(file_path)
+            if tag and tag.duration is not None:
+                duration = tag.duration
+                logger.debug(f"Tinytag detected duration for {os.path.basename(file_path)}: {duration:.2f} seconds")
+                return duration
+            logger.debug(f"Tinytag could not detect duration for {os.path.basename(file_path)}")
+        except Exception as e:
+            logger.debug(f"Error detecting duration for {os.path.basename(file_path)} using tinytag: {e}")
+
+    logger.debug(f"Failed to detect duration for {os.path.basename(file_path)} using both mutagen and tinytag.")
+    return None
+
+
+def format_duration(seconds):
+    """Formats duration in seconds to HH:MM:SS."""
+    if seconds is None:
+        return "N/A"
+    seconds = int(seconds)
+    hours = seconds // 3600
+    minutes = (seconds % 3600) // 60
+    seconds = seconds % 60
+    return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
 
 
 def load_output_data(filepath):
@@ -73,28 +195,33 @@ def load_output_data(filepath):
                 loaded_data = json.load(f)
                 if isinstance(loaded_data, dict):
                     data = loaded_data
+                else:
+                     logger.warning(f"Existing file '{filepath}' does not contain a JSON object. Starting with an empty structure.")
         except json.JSONDecodeError:
-            print(f"Warning: Could not decode existing JSON file '{filepath}'. Starting with an empty structure.")
+            logger.warning(f"Could not decode existing JSON file '{filepath}'. Starting with an empty structure.")
         except Exception as e:
-            print(f"Warning: Error reading existing JSON file '{filepath}': {e}. Starting with an empty structure.")
+            logger.warning(f"Error reading existing JSON file '{filepath}': {e}. Starting with an empty structure.")
     return data
 
 
 def save_output_data(filepath, data):
     """Saves data to a JSON file."""
     try:
+        os.makedirs(os.path.dirname(filepath) or '.', exist_ok=True)
         with open(filepath, "w") as f:
             json.dump(data, f, indent=4)
-        # print(f"Data saved to '{filepath}'.") # Removed verbose save message
+        logger.debug(f"Data saved to '{filepath}'.") # Debug logs are still logged
     except Exception as e:
-        print(f"Error saving data to '{filepath}': {e}")
+        logger.error(f"Error saving data to '{filepath}': {e}")
 
 
 def get_assemblyai_api_key():
     """Gets the AssemblyAI API key from environment variables or asks the user with masking."""
     api_key = os.environ.get("ASSEMBLYAI_API_KEY")
     if not api_key:
-        api_key = getpass.getpass("Please enter your AssemblyAI API key for transcription: ")
+        # Use standard print for getpass prompt
+        print("Please enter your AssemblyAI API key for transcription: ", end="", flush=True)
+        api_key = getpass.getpass("")
     return api_key
 
 
@@ -102,115 +229,227 @@ def get_xai_api_key():
     """Gets the xAI API key from environment variables or asks the user with masking."""
     api_key = os.environ.get("XAI_API_KEY")
     if not api_key:
-        api_key = getpass.getpass("Please enter your xAI API key for summarization: ")
+        print("Please enter your xAI API key for summarization: ", end="", flush=True)
+        api_key = getpass.getpass("")
     return api_key
 
+# --- Function to Download File from URL ---
+def download_file_from_url(url, download_folder=DOWNLOAD_FOLDER, overall_pbar=None):
+    """Downloads a file from a given URL to a specified folder."""
+    os.makedirs(download_folder, exist_ok=True)
+    local_filename = url.split('/')[-1]
+    local_filename = re.sub(r'[^\w.-]', '_', local_filename)
+    if not local_filename or '.' not in local_filename:
+         local_filename = f"downloaded_file_{int(time.time())}" + os.path.splitext(url)[1]
 
-def find_audio_file(filename):
-    """Searches for the audio file in the current folder or ./data/ folder."""
-    if os.path.exists(filename):
-        return filename
-    data_folder = "./data/"
-    filepath = os.path.join(data_folder, filename)
-    if os.path.exists(filepath):
+    filepath = os.path.join(download_folder, local_filename)
+
+    # Use print or tqdm.write for INFO messages in non-verbose
+    if logger.isEnabledFor(logging.INFO): # Check if in non-verbose mode
+         if overall_pbar and not overall_pbar.disable:
+              overall_pbar.write(f"Downloading {os.path.basename(filepath)}...")
+              overall_pbar.refresh()
+         else:
+              print(f"Downloading {os.path.basename(filepath)}...", flush=True)
+
+
+    logger.debug(f"Attempting to download from {url} to {filepath}") # Debug only
+
+    try:
+        # Use tqdm for download progress - disabled if not in INFO mode
+        with tqdm(total=None, unit='B', unit_scale=True, desc=f"Download Progress", leave=False, disable=not logger.isEnabledFor(logging.INFO), file=sys.stdout) as pbar:
+            try:
+                 response_head = requests.head(url, allow_redirects=True)
+                 total_size = int(response_head.headers.get('content-length', 0))
+                 if total_size > 0:
+                     pbar.total = total_size
+            except Exception as e:
+                 logger.debug(f"Could not get content length for download: {e}") # Debug only
+                 pbar.total = None
+
+            with requests.get(url, stream=True) as r:
+                r.raise_for_status()
+
+                block_size = 8192
+
+                with open(filepath, 'wb') as f:
+                    for chunk in r.iter_content(chunk_size=block_size):
+                        if chunk:
+                            pbar.update(len(chunk))
+
+        # Clear the download progress bar line if it was active and not completed
+        if logger.isEnabledFor(logging.INFO) and (pbar.total is None or pbar.n < (pbar.total or 1)):
+             print(" " * 80, end='\r', flush=True)
+
+        # Use print or tqdm.write for download complete message in non-verbose
+        if logger.isEnabledFor(logging.INFO):
+             if overall_pbar and not overall_pbar.disable:
+                  overall_pbar.write(f"Download complete: {os.path.basename(filepath)}")
+                  overall_pbar.refresh()
+             else:
+                  print(f"Download complete: {os.path.basename(filepath)}", flush=True)
+
+
+        logger.debug(f"Downloaded file path: {filepath}") # Debug only
         return filepath
-    return None
+    except requests.exceptions.RequestException as e:
+        logger.error(f"Error downloading file from {url}: {e}") # Keep error
+        if hasattr(e, 'response') and e.response is not None:
+             logger.debug(f"Download HTTP Status: {e.response.status_code}") # Debug only
+             try:
+                 logger.debug(f"Download Response Body: {e.response.json()}") # Debug only
+             except json.JSONDecodeError:
+                 logger.debug(f"Download Response Body (non-JSON): {e.cause.response.text}") # Debug only
+        return None
+    except Exception as e:
+        logger.error(f"An unexpected error occurred during download: {e}") # Keep error
+        return None
 
 
 # --- AssemblyAI Transcription Function with Retry Workaround ---
-# Apply the retry decorator directly to the core transcription logic within the function
-def transcribe_audio_with_diarization(audio_file_path, assemblyai_api_key, num_speakers=None, force=False):
+def transcribe_audio_with_diarization(audio_file_path, assemblyai_api_key, num_speakers=None, force=False, overall_pbar=None, file_status_desc=""):
     """
-    Transcribes a local MP3 audio file with speaker diarization using AssemblyAI.
-
-    Args:
-        audio_file_path (str): The path to the local MP3 audio file.
-        assemblyai_api_key (str): The AssemblyAI API key.
-        num_speakers (int, optional): The expected number of speakers.
-                                       Providing this can improve accuracy. Defaults to None.
-        force (bool, optional): Force transcription even if transcript data exists in output file. Defaults to False.
-
-    Returns:
-        list: A list of dictionaries, where each dictionary represents a spoken segment
-              and contains the speaker label and the transcribed text.
-              Returns None if transcription fails or is skipped.
+    Transcribes a local audio/video file with speaker diarization using AssemblyAI.
+    Returns transcript segments and detected duration.
+    overall_pbar and file_status_desc are used to update the tqdm description.
     """
-    output_filename = os.path.splitext(audio_file_path)[0] + TRANSCRIPT_FILENAME_SUFFIX
+    base_filename = os.path.basename(audio_file_path)
+    output_dir = os.path.dirname(audio_file_path) or '.'
+    output_filename = os.path.join(output_dir, os.path.splitext(base_filename)[0] + TRANSCRIPT_FILENAME_SUFFIX)
+
     output_data = load_output_data(output_filename)
 
     if "transcript" in output_data and not force:
-        print(
+        logger.warning(
             f"Transcript data found in '{output_filename}'. Skipping transcription (use --force-transcribe to re-run)."
-        )
-        # Return the segments list directly if it exists
-        return output_data.get("transcript", {}).get("segments")
+        ) # Keep warning
+        existing_segments = output_data.get("transcript", {}).get("segments")
+        existing_duration = output_data.get("audio_info", {}).get("duration_seconds")
+        return existing_segments, existing_duration
 
     if not assemblyai_api_key:
-        print("Error: AssemblyAI API key not provided. Exiting transcription.")
-        return None
+        logger.error("Error: AssemblyAI API key not provided. Exiting transcription.") # Keep error
+        return None, None
 
-    assemblyai.settings.api_key = assemblyai_api_key  # Use the passed key
+    assemblyai.settings.api_key = assemblyai_api_key
 
-    print(f"Starting transcription for '{audio_file_path}'...")
+    logger.debug(f"Step: Starting AssemblyAI transcription...") # Debug only
+    logger.debug(f"Sending '{audio_file_path}' for transcription with {num_speakers} expected speakers.") # Debug only
     try:
-        # Define the retryable core logic as a nested function or apply decorator here if possible
-        @assemblyai_retry_settings  # Apply the retry decorator here
-        def _transcribe_core(file_path, num_speakers_expected):
+        @assemblyai_retry_settings
+        def _transcribe_core(file_path, num_speakers_expected, pbar, file_desc):
             config = assemblyai.TranscriptionConfig(
                 speaker_labels=True,
-                speakers_expected=num_speakers_expected,  # Use the passed arg
+                speakers_expected=num_speakers_expected,
             )
             transcriber = assemblyai.Transcriber(config=config)
-            return transcriber.transcribe(file_path)  # This call is now retried
 
-        # Call the retryable core logic
-        transcript = _transcribe_core(audio_file_path, num_speakers)
+            logger.debug("Submitting transcription job to AssemblyAI...") # Debug only
 
-        if transcript and transcript.utterances:
+            transcript = transcriber.transcribe(file_path)
+            logger.debug(f"Transcription job submitted. Job ID: {transcript.id}") # Debug only
+
+            # Update tqdm description or print status dynamically
+            while transcript.status in ['queued', 'processing']:
+                status_msg = f"[Transcription: {transcript.status.value}]"
+                if logger.isEnabledFor(logging.INFO): # Only update dynamic status in non-verbose
+                    if pbar and not pbar.disable:
+                         pbar.set_description(f"{file_desc} {status_msg}")
+                         pbar.refresh()
+                    else:
+                         print(f"{file_desc} {status_msg}", end='\r', flush=True)
+                logger.debug(f"Polling status for job {transcript.id}: {transcript.status.value}") # Debug polling status
+
+                time.sleep(5)
+                transcript = transcriber.get_transcript(transcript.id)
+
+
+            # Ensure final status is reflected in description before next step
+            final_status_msg = f"[Transcription: {transcript.status.value}]"
+            if logger.isEnabledFor(logging.INFO): # Only update dynamic status in non-verbose
+                 if pbar and not pbar.disable:
+                      pbar.set_description(f"{file_desc} {final_status_msg}")
+                      pbar.refresh()
+                 else:
+                      print(f"{file_desc} {final_status_msg}", end='\r', flush=True)
+                      # Clear the line only in fallback mode if it was printed
+                      # Only clear if transcription wasn't completed successfully and in non-verbose
+                      if transcript.status != 'completed' and logger.isEnabledFor(logging.INFO):
+                           print(" " * (len(file_desc) + len(final_status_msg) + 5), end='\r', flush=True)
+
+
+            if transcript.status == 'completed':
+                 logger.debug("Transcription status: Completed.") # Debug only
+                 detected_duration = None
+                 if hasattr(transcript, 'duration') and transcript.duration is not None:
+                     detected_duration = transcript.duration
+                     # Duration is informational, handled in process_single_file logging summary
+                 # Note: duration is NOT saved to output_data here, but in process_single_file using AA or local duration
+
+                 return transcript, detected_duration
+            else:
+                 logger.error(f"Transcription failed with status: {transcript.status.value}") # Keep error
+                 if transcript.error:
+                     logger.error(f"Error details: {transcript.error}") # Keep error
+                 return None, None
+
+        # Pass audio_file_path to _transcribe_core
+        transcript_object, aa_detected_duration = _transcribe_core(audio_file_path, num_speakers, overall_pbar, file_status_desc)
+
+        if transcript_object and transcript_object.utterances:
             segments = []
-            for utterance in transcript.utterances:
+            for utterance in transcript_object.utterances:
                 segments.append({"speaker": f"Speaker {utterance.speaker}", "text": utterance.text})
-            # Ensure 'transcript' key exists before adding segments
+
             if "transcript" not in output_data:
                 output_data["transcript"] = {}
             output_data["transcript"]["segments"] = segments
-
+            detected_speaker_count = len(set(s['speaker'] for s in segments))
+            output_data["transcript"]["detected_speaker_count"] = detected_speaker_count
+            output_data["transcript"]["expected_speakers_input"] = num_speakers
+            # Speaker count is informational, handled in process_single_file logging summary
             save_output_data(output_filename, output_data)
-            print(f"Transcription complete and saved to '{output_filename}'.")
-            return segments
+            logger.debug(f"Step: Transcription data processed and saved.") # Debug only
+            return segments, aa_detected_duration # Return AA duration here
+        elif transcript_object is not None:
+            logger.warning("Transcription completed, but no utterances found (possibly empty audio).") # Keep warning
+            if "transcript" not in output_data:
+                 output_data["transcript"] = {}
+            output_data["transcript"]["segments"] = []
+            output_data["transcript"]["detected_speaker_count"] = 0
+            output_data["transcript"]["expected_speakers_input"] = num_speakers
+            save_output_data(output_filename, output_data)
+            return [], aa_detected_duration # Return AA duration here
+
         else:
-            print("Transcription failed or no utterances found.")
-            return None
+            logger.error("Transcription failed.") # Keep error
+            return None, None
 
     except tenacity.RetryError as e:
-        # This exception is raised by tenacity if all retries fail
-        print(f"Failed to transcribe audio after multiple retries: {e}")
-        # Attempt to print details from the last attempt if it was a requests HTTP error
+        logger.error(f"Failed to transcribe audio after multiple retries: {e}") # Keep error
         if e.cause and isinstance(e.cause, requests.exceptions.RequestException):
-            if hasattr(e.cause, "response") and hasattr(e.cause.response, "status_code"):
-                print(f"Last attempt failed with HTTP status: {e.cause.response.status_code}")
-                try:
-                    error_details = e.cause.response.json()
-                    print(f"Error details: {error_details}")
-                except json.JSONDecodeError:
-                    print(f"Error response body: {e.cause.response.text}")
-            else:
-                print(f"Last attempt failed with request exception: {e.cause}")  # Print other request exception details
-        return None
-    # Catch requests exceptions that weren't retried (e.g., 400, 401, 404) or other non-retryable request issues
+             if hasattr(e.cause, "response") and hasattr(e.cause.status_code):
+                 logger.error(f"Last attempt failed with HTTP status: {e.cause.response.status_code}") # Keep error
+                 try:
+                     error_details = e.cause.response.json()
+                     logger.error(f"Error details: {error_details}") # Keep error
+                 except json.JSONDecodeError:
+                     logger.error(f"Error response body: {e.cause.response.text}") # Keep error
+             else:
+                 logger.error(f"Last attempt failed with request exception: {e.cause}") # Keep error
+        return None, None
     except requests.exceptions.RequestException as e:
-        print(f"A requests error occurred during AssemblyAI transcription that was not retried: {e}")
-        # Print specific HTTP error details if available
+        logger.error(f"A requests error occurred during AssemblyAI transcription that was not retried: {e}") # Keep error
         if isinstance(e, requests.exceptions.HTTPError):
-            print(f"HTTP Status: {e.response.status_code}")
+            logger.error(f"HTTP Status: {e.response.status_code}") # Keep error
             try:
-                print(f"Response Body: {e.response.json()}")
+                logger.error(f"Response Body: {e.response.json()}") # Keep error
             except json.JSONDecodeError:
-                print(f"Response Body (non-JSON): {e.response.text}")
-        return None
-    except Exception as e:  # Catch any other unexpected errors
-        print(f"An unexpected error occurred during transcription: {e}")
-        return None
+                logger.error(f"Response Body (non-JSON): {e.cause.response.text}") # Keep error
+        return None, None
+    except Exception as e:
+        logger.error(f"An unexpected error occurred during transcription: {e}") # Keep error
+        return None, None
 
 
 # --- Retryable xAI Models List Call ---
@@ -218,60 +457,58 @@ def transcribe_audio_with_diarization(audio_file_path, assemblyai_api_key, num_s
 @tenacity.retry(
     retry=retry_if_transient_http_error | tenacity.retry_if_exception_type(requests.exceptions.RequestException)
 )
-def fetch_xai_models_with_retry(api_key):
+def fetch_xai_models_with_retry():
     """Fetches xAI models with retry logic."""
+    api_key = get_xai_api_key()
+    if not api_key:
+        logger.error("xAI API key not provided for fetching models.") # Keep error
+        return None
+
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+    logger.debug(f"Fetching xAI models from {XAI_MODELS_ENDPOINT}") # Debug only
     response = requests.get(XAI_MODELS_ENDPOINT, headers=headers)
-    response.raise_for_status()  # Raise HTTPError for bad status codes (handled by retry_if_transient_http_error)
+    logger.debug(f"xAI Models API response status: {response.status_code}") # Debug only
+    response.raise_for_status()
     return response.json()
 
 
-def get_latest_xai_model(api_key):
+def get_latest_xai_model():
     """
-    Fetches the list of available xAI models, prints the list, and selects a model
-    based on the prioritized grok pattern (grok-[num]-mini-fast-beta, grok-[num]-beta, grok-[num])
-    with the highest number, falling back to "grok-3-latest" if available, then the
-    first available model if no other option is suitable.
-
-    Args:
-        api_key (str): The xAI API key.
-
-    Returns:
-        str: The selected model ID, or None if fetching fails or no suitable model found.
+    Fetches the list of available xAI models, logs the list (at debug level),
+    and selects a model based on priority. Gets API key internally.
     """
-    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+    api_key = get_xai_api_key()
+    if not api_key:
+         logger.warning("xAI API key not available for model selection. Skipping.") # Keep warning
+         return None
 
-    print("Attempting to fetch list of available xAI models...")
+    logger.debug("Step: Fetching list of available xAI models...") # Debug only
     available_models = []
     try:
-        # Call the retryable function
-        models_data = fetch_xai_models_with_retry(api_key)
+        models_data = fetch_xai_models_with_retry()
 
         if not models_data or "data" not in models_data or not isinstance(models_data["data"], list):
-            print("Error: Unexpected response format from xAI models endpoint.")
+            logger.error("Error: Unexpected response format from xAI models endpoint.") # Keep error
             return None
 
         available_models = [model["id"] for model in models_data["data"] if "id" in model]
 
     except tenacity.RetryError as e:
-        # This exception is raised by tenacity if all retries fail
-        print(f"Failed to fetch xAI models after multiple retries: {e}")
+        logger.error(f"Failed to fetch xAI models after multiple retries: {e}") # Keep error
         return None
-    except Exception as e:  # Catch other potential errors during fetch or processing
-        print(f"An error occurred while fetching or processing xAI models: {e}")
+    except Exception as e:
+        logger.error(f"An error occurred while fetching or processing xAI models: {e}") # Keep error
         return None
 
-    # --- Print all available models ---
     if available_models:
-        print("\nAvailable models from xAI:")
+        logger.debug("\nAvailable models from xAI:") # Debug only
         for model_id in available_models:
-            print(f"- {model_id}")
-        print("-" * 20)
+            logger.debug(f"- {model_id}") # Debug only
+        logger.debug("-" * 20) # Debug only
     else:
-        print("\nNo models retrieved from xAI.")
-        return None  # Return None if the list is empty
+        logger.warning("\nNo models retrieved from xAI.") # Keep warning
+        return None
 
-    # --- Model Selection Logic based on prioritized grok patterns ---
     grok_pattern = re.compile(r"^grok-(\d+)(?:-.*)?$")
     grok_models_with_numbers = []
 
@@ -284,89 +521,71 @@ def get_latest_xai_model(api_key):
     selected_model = None
 
     if grok_models_with_numbers:
-        # Find the highest number among grok models
         highest_number = max([num for num, _ in grok_models_with_numbers])
 
-        # Construct NEW prioritized model names using the highest number
         prioritized_patterns = [
-            f"grok-{highest_number}-mini-fast-beta",  # New pattern
+            f"grok-{highest_number}-mini-fast-beta",
             f"grok-{highest_number}-beta",
             f"grok-{highest_number}",
         ]
 
-        print(f"Highest grok version found: {highest_number}. Checking prioritized patterns:")
+        logger.debug(f"Highest grok version found: {highest_number}. Checking prioritized patterns:") # Debug only
         for pattern in prioritized_patterns:
             if pattern in available_models:
                 selected_model = pattern
-                print(f"Selected model matching pattern: {selected_model}")
-                return selected_model  # Return the first match
+                logger.debug(f"Step: Selected model matching pattern: {selected_model}") # Debug only
+                return selected_model
 
-        # If none of the patterns with the highest number are found, fall through
-        print(f"None of the prioritized grok-{highest_number} patterns found.")
+        logger.debug(f"None of the prioritized grok-{highest_number} patterns found.") # Debug only
 
     else:
-        print("No models matching the 'grok-N' pattern found.")
-
-    # --- Final Fallback: Check for "grok-3-latest" then use the very first model ---
-    # This is reached if no grok models matching the pattern were found,
-    # or if grok models were found but none of the prioritized patterns
-    # with the highest number matched.
+        logger.debug("No models matching the 'grok-N' pattern found.") # Debug only
 
     fallback_specific = "grok-3-latest"
     if fallback_specific in available_models:
         selected_model = fallback_specific
-        print(f"Falling back to specific model: {selected_model}")
-        return selected_model  # Return the specific fallback
+        logger.debug(f"Step: Falling back to specific model: {selected_model}") # Debug only
+        return fallback_specific
 
-    # Final final fallback: Use the very first model in the available list
-    # available_models is guaranteed not to be empty here if we reached this point
-    # and didn't return None from the initial check.
-    selected_model = available_models[0]
-    print(
-        f"Neither prioritized grok patterns nor '{fallback_specific}' found. Falling back to selecting the first available model: {selected_model}"
-    )
-    return selected_model
+    if available_models:
+        selected_model = available_models[0]
+        logger.warning( # Keep warning for fallback model selection
+            f"Neither prioritized grok patterns nor '{fallback_specific}' found. Falling back to selecting the first available model: {selected_model}"
+        )
+        return selected_model
+    else:
+        logger.error("No available models found to select from.") # Keep error
+        return None
 
 
 def extract_speaker_name_mapping(summary_text):
     """
-    Analyzes the summary text to find potential speaker name mappings
-    like "Name (Speaker X)" or "Speaker X (Name)".
-
-    Args:
-        summary_text (str): The generated summary string.
-
-    Returns:
-        dict: A dictionary mapping original speaker labels to identified names
-              (e.g., {"Speaker A": "John", "Speaker B": "Sarah"}).
-        Note: This is a basic extraction and may not catch all name attributions.
+    Analyzes the summary text to find potential speaker name mappings.
     """
     if not summary_text:
         return {}
 
     name_mapping = {}
 
-    # Pattern 1: "Name (Speaker X)" - e.g., John (Speaker A)
-    # Catches single names or multi-word names separated by spaces
-    pattern1 = re.compile(r"(\b[A-Z][a-z]+\b(?:\s+[A-Z][a-z]+)*|\b[A-Z]+\b)\s+\(Speaker ([A-Z])\)")
+    pattern1 = re.compile(r"(\b[A-Z][a-z]+(?:['\s-][A-Z][a-z]+)*|\b[A-Z]+\b)\s+\(Speaker ([A-Z]+)\)")
     matches1 = pattern1.findall(summary_text)
     for name, speaker_label_suffix in matches1:
         original_label = f"Speaker {speaker_label_suffix}"
-        # Clean up name (remove leading/trailing whitespace)
         name_mapping[original_label] = name.strip()
 
-    # Pattern 2: "Speaker X (Name)" - e.g., Speaker C (Michael)
-    # Catches single names or multi-word names separated by spaces
-    pattern2 = re.compile(r"Speaker ([A-Z])\s+\((\b[A-Z][a-z]+\b(?:\s+[A-Z][a-z]+)*|\b[A-Z]+\b)\)")
+    pattern2 = re.compile(r"Speaker ([A-Z]+)\s+\((\b[A-Z][a-z]+(?:['\s-][A-Z][a-z]+)*|\b[A-Z]+\b)\)")
     matches2 = pattern2.findall(summary_text)
     for speaker_label_suffix, name in matches2:
         original_label = f"Speaker {speaker_label_suffix}"
-        # Clean up name
         name_mapping[original_label] = name.strip()
 
-    # Note: This basic parsing might miss names used without the Speaker X label in the summary
-    # or names used in conversational context without a direct mapping provided by the LLM.
+    pattern3 = re.compile(r"(\b[A-Z][a-z]+(?:['\s-][A-Z][a-z]+)*|\b[A-Z]+\b)\s+\(Speaker ([A-Z]+)\)\s+said")
+    matches3 = pattern3.findall(summary_text)
+    for name, speaker_label_suffix in matches3:
+         original_label = f"Speaker {speaker_label_suffix}"
+         name_mapping[original_label] = name.strip()
 
+    logger.debug(f"Extracted potential speaker name mapping: {name_mapping}") # Debug only
     return name_mapping
 
 
@@ -379,14 +598,14 @@ def post_xai_messages_with_retry(api_key, model_id, prompt_text, max_tokens):
     """Posts message to xAI API with retry logic."""
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
     payload = {
-        "model": model_id,  # Use the dynamically determined model ID
-        "messages": [{"role": "user", "content": prompt_text}],  # Use the updated prompt
-        "max_tokens": max_tokens,  # Use the passed max_tokens value
-        # Add other parameters as needed based on xAI API documentation for /v1/messages
+        "model": model_id,
+        "messages": [{"role": "user", "content": prompt_text}],
+        "max_tokens": max_tokens,
     }
-
+    logger.debug(f"Sending summarization request to {XAI_MESSAGES_ENDPOINT} with payload: {payload}") # Debug only
     response = requests.post(XAI_MESSAGES_ENDPOINT, headers=headers, json=payload)
-    response.raise_for_status()  # Raise HTTPError (handled by retry_if_transient_http_error)
+    logger.debug(f"xAI Messages API response status: {response.status_code}") # Debug only
+    response.raise_for_status()
     return response.json()
 
 
@@ -398,56 +617,38 @@ def summarize_transcript_with_xai(
     audio_datetime_str=None,
     force=False,
     max_tokens=10000,
+    overall_pbar=None, # Accept overall_pbar
+    file_status_desc="" # Accept file status description prefix
 ):
     """
-    Summarizes the given transcript segments using a specified xAI LLM model,
-    extracts identified speaker names from the summary to update the transcript,
-    and saves the summary, usage data, and updated transcript to the output file.
-
-    Args:
-        transcript_segments (list): A list of dictionaries representing the transcribed audio segments.
-        audio_file_path (str): The path to the local MP3 audio file (for output filename).
-        xai_api_key (str): The xAI API key.
-        model_id (str): The ID of the xAI model to use for summarization.
-        audio_datetime_str (str, optional): Formatted date/time string of the audio recording. Defaults to None.
-        force (bool, optional): Force summarization even if summary exists in output file. Defaults to False.
-        max_tokens (int, optional): Maximum number of tokens for the xAI response. Defaults to 10000.
-
-    Returns:
-        str: The summary generated by xAI, or None if summarization fails or is skipped.
+    Summarizes the given transcript segments using a specified xAI LLM model.
+    overall_pbar and file_status_desc are used to update the tqdm description.
     """
-    output_filename = os.path.splitext(audio_file_path)[0] + TRANSCRIPT_FILENAME_SUFFIX
-    # Load output_data at the start to ensure we have the latest transcript segments
-    # and other info like audio_info before adding summary/usage or updating segments.
+    base_filename = os.path.basename(audio_file_path)
+    output_dir = os.path.dirname(audio_file_path) or '.'
+    output_filename = os.path.join(output_dir, os.path.splitext(base_filename)[0] + TRANSCRIPT_FILENAME_SUFFIX)
+
     output_data = load_output_data(output_filename)
 
-    # Check if summary or xai_usage exists and force is not requested
     if ("summary" in output_data or "xai_usage" in output_data) and not force:
-        print(
+        logger.warning(
             f"Summary or xAI usage data found in '{output_filename}'. Skipping summarization (use --force-summarize to re-run)."
-        )
-        # Return the summary if it exists, otherwise None
-        return output_data.get("summary")
+        ) # Keep warning
+        return output_data.get("summary"), output_data.get("xai_usage") # Return existing usage if skipping
 
     if not xai_api_key:
-        print("Error: xAI API key not provided. Exiting summarization.")
-        return None
+        logger.error("Error: xAI API key not provided. Exiting summarization.") # Keep error
+        return None, None
 
     if not XAI_MESSAGES_ENDPOINT:
-        print("Error: xAI Messages API endpoint not configured. Exiting summarization.")
-        return None
+        logger.error("Error: xAI Messages API endpoint not configured. Exiting summarization.") # Keep error
+        return None, None
 
-    # Format the transcript for the prompt
+    if not transcript_segments:
+         logger.warning("No transcript segments available for summarization. Skipping.") # Keep warning
+         return None, None
+
     full_transcript_text = "\n".join([f"{item['speaker']}: {item['text']}" for item in transcript_segments])
-
-    headers = {
-        "Authorization": f"Bearer {xai_api_key}",
-        "Content-Type": "application/json",
-    }
-
-    # --- Prompt: Instructing the model on Markdown, meeting format, date, and NEW speaker naming rules ---
-    # Includes instructions for Markdown, bullet points, meeting format, date,
-    # AND using identified speaker names instead of labels, with first vs subsequent mention formatting.
 
     prompt_text = f"""Summarize the following conversation transcript. Format the output in Markdown.
 
@@ -462,7 +663,7 @@ Focus on key discussion points, using a bulleted list (`- `). Attribute points t
 
 If the conversation resembles a meeting, include relevant sections formatted as Markdown, such as:
 - **Date:** {audio_datetime_str if audio_datetime_str else 'N/A'}
-- **Attendees:** [List identified speakers by name, or label if name is unknown. Use the first mention format defined above for each attendee listed here.]
+- **Attendees:** [List identified speakers by name, or label if name is unknown. Use the first mention format defined above for each attendee listed here. List them in order of their first appearance in the transcript.]
 - **Topics Discussed:** (Reference the bulleted list of key points)
 - **Decisions:** [List any decisions identified]
 - **Action Items:** [List any action items identified]
@@ -472,123 +673,308 @@ If it is not a meeting, provide a concise summary using a Markdown bulleted list
 Transcript:
 {full_transcript_text}
 """
+    logger.debug(f"Prompt sent to xAI:\n---\n{prompt_text}\n---") # Debug only
 
-    # Payload structure for the /v1/messages endpoint
     payload = {
-        "model": model_id,  # Use the dynamically determined model ID
-        "messages": [{"role": "user", "content": prompt_text}],  # Use the updated prompt
-        "max_tokens": max_tokens,  # Use the passed max_tokens value
-        # Add other parameters as needed based on xAI API documentation for /v1/messages
+        "model": model_id,
+        "messages": [{"role": "user", "content": prompt_text}],
+        "max_tokens": max_tokens,
     }
 
-    print(f"Sending summarization request to xAI using model: {model_id} with max_tokens={max_tokens}...")
-    try:
-        # Call the retryable function
-        summary_data = post_xai_messages_with_retry(xai_api_key, model_id, prompt_text, max_tokens)
+    # Update tqdm description or print status dynamically
+    status_msg = "[Summarization: Sending to xAI]"
+    if logger.isEnabledFor(logging.INFO): # Only update dynamic status in non-verbose
+         if overall_pbar and not overall_pbar.disable:
+              overall_pbar.set_description(f"{file_status_desc} {status_msg}")
+              overall_pbar.refresh()
+         else:
+              print(f"{file_status_desc} {status_msg}", end='\r', flush=True)
 
-        # --- Extract summary and usage based on the provided response structure ---
+
+    logger.debug(f"Step: Sending summarization request to xAI...") # Debug only
+    logger.debug(f"Using model: {model_id}, max_tokens={max_tokens}") # Debug only
+    try:
+        summary_data = post_xai_messages_with_retry(xai_api_key, model_id, prompt_text, max_tokens)
+        logger.debug(f"xAI API response data: {summary_data}") # Debug only
+
         summary = None
         usage = None
 
-        # Extract summary text from the content list (as per your error output structure)
         if summary_data and "content" in summary_data and isinstance(summary_data["content"], list):
-            # Iterate through content blocks to find the text block
             for block in summary_data["content"]:
                 if isinstance(block, dict) and block.get("type") == "text" and "text" in block:
                     summary = block["text"]
-                    break  # Found the text summary, stop searching
+                    break
 
-        # Extract usage information
         if summary_data and "usage" in summary_data and isinstance(summary_data["usage"], dict):
             usage = summary_data["usage"]
-        # --- End Extraction ---
+            logger.debug(f"Raw xAI usage data: {usage}") # Debug only
+
 
         if summary:
-            # Ensure 'summary' key is updated in output_data
             output_data["summary"] = summary
-            print(f"Summary generated successfully.")
+            logger.debug(f"Step: Summary generated successfully.") # Debug only
+            logger.debug(f"Generated Summary:\n---\n{summary}\n---") # Debug only
 
-            # Save usage data if available
+
             if usage is not None:
                 output_data["xai_usage"] = usage
-                print(f"xAI usage data recorded: {usage}")
+                logger.debug(f"xAI usage data recorded: {usage}") # Debug only
+                # XAI Tokens Used is informational - handled in process_single_file logging summary
 
-            # --- Extract speaker name mapping and update transcript segments ---
-            print("Attempting to extract speaker names from summary for transcript update...")
+
+            logger.debug("Step: Attempting to extract speaker name mapping from summary...") # Debug only
             speaker_name_mapping = extract_speaker_name_mapping(summary)
 
             if speaker_name_mapping:
-                print(f"Identified speaker names to map: {speaker_name_mapping}")
-                # Access the transcript segments that are already loaded in output_data
-                # Ensure segments exist in the loaded data before attempting update
+                # Identified speaker names is informational - handled in process_single_file logging summary
                 if (
                     "transcript" in output_data
                     and isinstance(output_data["transcript"], dict)
                     and "segments" in output_data["transcript"]
                     and isinstance(output_data["transcript"]["segments"], list)
                 ):
-                    print("Updating transcript segments with identified names...")
-                    updated_segments = []
-                    # Iterate through a copy of the segments list to avoid issues while potentially modifying
-                    for segment in output_data["transcript"]["segments"].copy():
+                    logger.debug("Updating transcript segments with identified names...") # Debug only
+                    for segment in output_data["transcript"]["segments"]:
                         original_speaker_label = segment.get("speaker")
-                        # Check if the original label exists in the mapping and if segment has a speaker key
                         if original_speaker_label and original_speaker_label in speaker_name_mapping:
-                            # Create a new segment dictionary with the updated speaker name
-                            updated_segment = segment.copy()
-                            updated_segment["speaker"] = speaker_name_mapping[original_speaker_label]
-                            updated_segments.append(updated_segment)
-                        else:
-                            updated_segments.append(segment)  # Keep original segment if no mapping or no speaker key
-
-                    # Replace the old segments list in output_data with the new one
-                    output_data["transcript"]["segments"] = updated_segments
-                    print("Transcript segments updated.")
+                             segment["speaker"] = speaker_name_mapping[original_speaker_label]
+                    logger.debug("Transcript segments updated.") # Debug only
                 else:
-                    print(
-                        "Warning: Transcript segments not found in output_data in expected format for name mapping update."
-                    )
+                    logger.warning(
+                        "Transcript segments not found in output_data in expected format for name mapping update."
+                    ) # Keep warning
             else:
-                print("No speaker names identified from the summary for transcript update.")
-            # --- End New ---
+                logger.debug("No speaker names identified from the summary for transcript update.") # Debug only
 
-            # Save the updated output_data (includes summary, usage, audio_info, and potentially updated transcript)
             save_output_data(output_filename, output_data)
-            print(f"Summary, usage, audio info, and updated transcript saved to '{output_filename}'.")
+            logger.debug(f"Step: Summary, usage, and updated transcript data processed and saved.") # Debug only
 
-            return summary
+            return summary, usage # Return both summary and usage
+
         else:
-            print(f"Error: Could not extract summary text from xAI API response. Response data: {summary_data}")
-            # Still attempt to save usage data if available, even if summary extraction failed
-            # Note: transcript name mapping is skipped if no summary text is extracted
+            logger.error(f"Error: Could not extract summary text from xAI API response. Response data: {summary_data}") # Keep error
             if usage is not None:
-                output_data["xai_usage"] = usage
-                print(f"xAI usage data recorded despite summary extraction failure: {usage}")
-                save_output_data(output_filename, output_data)  # Save again to include usage
-                print(f"Usage data saved to '{output_filename}'.")
+                 output_data["xai_usage"] = usage
+                 logger.debug(f"xAI usage data recorded despite summary extraction failure: {usage}") # Debug only
+                 save_output_data(output_filename, output_data)
+                 logger.warning(f"Usage data saved to '{output_filename}'.") # Keep warning for saving usage data
 
-            return None
+            return None, usage # Return usage even if summary extraction fails
 
     except tenacity.RetryError as e:
-        # This exception is raised by tenacity if all retries fail
-        print(f"Failed to generate summary after multiple retries: {e}")
-        return None
-    except Exception as e:  # Catch other potential errors during post or processing
-        print(f"An error occurred during summarization: {e}")
-        return None
+        logger.error(f"Failed to generate summary after multiple retries: {e}") # Keep error
+        return None, None
+    except Exception as e:
+        logger.error(f"An error occurred during summarization: {e}") # Keep error
+        return None, None
+
+# --- Function to process a single file ---
+def process_single_file(file_path, assemblyai_api_key, xai_api_key, expected_speakers, force_transcribe, force_summarize, max_tokens, overall_pbar=None, file_index=None, total_files=None):
+    """Processes a single audio/video file."""
+
+    # Prepare file status description prefix for tqdm bar
+    file_status_prefix = f"File {file_index}/{total_files}: {os.path.basename(file_path)}" if overall_pbar else f"File: {os.path.basename(file_path)}"
+
+    # Log file processing start in verbose. In non-verbose, it's implicit in tqdm description.
+    if logger.isEnabledFor(logging.DEBUG): # Only log in verbose mode
+         logger.info(f"--- Starting processing for {os.path.basename(file_path)} ---")
+
+
+    audio_datetime_str = None
+    try:
+        mtime = os.path.getmtime(file_path)
+        audio_datetime_str = datetime.datetime.fromtimestamp(mtime).strftime("%Y-%m-%d %H:%M:%S")
+        # Date/Time is informational - handled in final logging summary if needed
+
+
+    except OSError as e:
+        logger.warning(f"Could not get file modification time for '{file_path}': {e}") # Keep warning
+    except Exception as e:
+        logger.warning(f"An unexpected error occurred while getting audio date/time: {e}") # Keep warning
+
+    # Corrected variable name here from audio_file_path to file_path
+    base_filename = os.path.basename(file_path)
+    output_dir = os.path.dirname(file_path) or '.'
+    output_filename = os.path.join(output_dir, os.path.splitext(base_filename)[0] + TRANSCRIPT_FILENAME_SUFFIX)
+    output_data = load_output_data(output_filename)
+
+    if "audio_info" not in output_data:
+         output_data["audio_info"] = {}
+    output_data["audio_info"]["original_path"] = file_path
+    if audio_datetime_str:
+         output_data["audio_info"]["recorded_datetime"] = audio_datetime_str
+    save_output_data(output_filename, output_data)
+
+
+    # --- Transcription ---
+    logger.debug(f"Step: Starting transcription process...") # Debug only
+    # Update tqdm description or print status for transcription
+    status_msg = "[Transcription]"
+    if logger.isEnabledFor(logging.INFO): # Only update dynamic status in non-verbose
+         if overall_pbar and not overall_pbar.disable:
+              overall_pbar.set_description(f"{file_status_prefix} {status_msg}")
+              overall_pbar.refresh()
+         else:
+              print(f"{file_status_prefix} {status_msg}", end='\r', flush=True)
+
+
+    transcript_segments, aa_detected_duration = transcribe_audio_with_diarization(
+        file_path, assemblyai_api_key, expected_speakers, force=force_transcribe, overall_pbar=overall_pbar, file_status_desc=file_status_prefix
+    )
+
+    # --- Determine duration for overall progress bar update ---
+    duration_for_pbar_update = None
+    update_source = "None"
+
+    if aa_detected_duration is not None and aa_detected_duration > 0:
+        duration_for_pbar_update = aa_detected_duration
+        update_source = "AssemblyAI"
+    else:
+        # If AA duration is not available or zero, try local duration for pbar update
+        local_duration = get_audio_duration(file_path) # Get local duration for this file
+        if local_duration is not None and local_duration > 0:
+            duration_for_pbar_update = local_duration
+            update_source = "Local"
+            # If using local duration for pbar, also save it to output data if AA didn't provide one
+            if "duration_seconds" not in output_data.get("audio_info", {}):
+                 output_data.setdefault("audio_info", {})["duration_seconds"] = local_duration
+                 save_output_data(output_filename, output_data)
+
+
+    # --- Update overall progress bar ---
+    if overall_pbar: # Check if pbar exists
+        if duration_for_pbar_update is not None and duration_for_pbar_update > 0: # Also check if duration is positive
+             logger.debug(f"Updating overall_pbar with duration from {update_source}: {duration_for_pbar_update:.2f}") # Debug print
+             overall_pbar.update(duration_for_pbar_update)
+             overall_pbar.refresh()
+        else:
+             logger.debug(f"Valid duration ({duration_for_pbar_update}) from {update_source} not available, cannot update overall_pbar for {os.path.basename(file_path)}.") # Debug print
+             # Inform the user in non-verbose mode if duration update is skipped
+             if logger.isEnabledFor(logging.INFO):
+                  if overall_pbar and not overall_pbar.disable:
+                       overall_pbar.write(f"Warning: Could not get valid duration ({update_source}) for {os.path.basename(file_path)}. Overall progress bar may not update accurately for this file.")
+                       overall_pbar.refresh()
+                  # No fallback print needed here, as the lack of update is the message
+
+
+    elif logger.isEnabledFor(logging.DEBUG): # If no overall pbar but in verbose, still log detected duration
+        logger.debug(f"Detected duration for single file from {update_source}: {duration_for_pbar_update:.2f}")
+
+
+    # --- Summarization ---
+    xai_usage_data = None # Variable to hold xAI usage data for final summary log
+    summary = None # Variable to hold summary
+
+    if transcript_segments is not None:
+        logger.debug(f"Step: Starting summarization process...") # Debug only
+        # Update tqdm description or print status for summarization
+        status_msg = "[Summarization]"
+        if logger.isEnabledFor(logging.INFO): # Only update dynamic status in non-verbose
+             if overall_pbar and not overall_pbar.disable:
+                  overall_pbar.set_description(f"{file_status_prefix} {status_msg}")
+                  overall_pbar.refresh()
+             else:
+                  print(f"{file_status_prefix} {status_msg}", end='\r', flush=True)
+
+
+        if xai_api_key:
+            selected_model = get_latest_xai_model() # Get key internally now
+            if selected_model:
+                summary, xai_usage_data = summarize_transcript_with_xai( # Capture usage data
+                    transcript_segments,
+                    file_path,
+                    xai_api_key,
+                    selected_model,
+                    audio_datetime_str=audio_datetime_str,
+                    force=force_summarize,
+                    max_tokens=max_tokens,
+                    overall_pbar=overall_pbar, # Pass overall_pbar
+                    file_status_desc=file_status_prefix # Pass file status prefix
+                )
+            else:
+                logger.warning("Could not determine a suitable xAI model. Skipping summarization.") # Keep warning
+        else:
+            logger.warning("xAI API key not available. Skipping summarization.") # Keep warning
+    else:
+        logger.warning("Transcription failed or skipped. Skipping summarization.") # Keep warning
+
+
+    # Clear the dynamic line completely using the prefix length
+    # Only clear if an overall bar was NOT active, as tqdm manages its own line
+    if logger.isEnabledFor(logging.INFO) and (overall_pbar is None or overall_pbar.disable):
+         # Estimate line length to clear
+         est_len = len(file_status_prefix) + 40 # Add some buffer
+         print(" " * est_len, end='\r', flush=True)
+
+
+    # --- Log final summary details for the file ---
+    # This block handles summary details for both verbose and non-verbose
+    summary_lines = []
+    summary_lines.append(f"--- Finished processing {os.path.basename(file_path)} ---")
+
+    # Reload output data to get latest duration and speakers and usage if needed
+    output_data_final = load_output_data(output_filename)
+    # Get duration from output data, which now prefers local if AA was None/0
+    final_duration_seconds = output_data_final.get("audio_info", {}).get("duration_seconds")
+    final_speakers = output_data_final.get("transcript", {}).get("detected_speaker_count")
+    final_xai_usage = output_data_final.get("xai_usage", {})
+
+
+    if audio_datetime_str:
+         summary_lines.append(f"Date/Time: {audio_datetime_str}")
+
+    # Use the duration from output data for the final summary display
+    if final_duration_seconds is not None:
+         summary_lines.append(f"Duration: {format_duration(final_duration_seconds)}")
+
+
+    if final_speakers is not None:
+         summary_lines.append(f"Speakers detected: {final_speakers}")
+
+    if final_xai_usage:
+        prompt_t = final_xai_usage.get('input_tokens', 'N/A')
+        completion_t = final_xai_usage.get('output_tokens', 'N/A')
+        total_t = 'N/A'
+        if isinstance(prompt_t, int) and isinstance(completion_t, int):
+            total_t = prompt_t + completion_t
+        summary_lines.append(f"xAI Tokens: In:{prompt_t}, Out:{completion_t}, Total:{total_t}")
+
+
+    summary_lines.append(f"Output saved to: {output_filename}")
+
+    # Print the summary block using appropriate method
+    if logger.isEnabledFor(logging.INFO): # In non-verbose, print above the next tqdm bar
+         if overall_pbar and not overall_pbar.disable:
+              for line in summary_lines:
+                   overall_pbar.write(line)
+              overall_pbar.refresh()
+         else: # In non-verbose single file, just print
+              for line in summary_lines:
+                   print(line, flush=True)
+
+    else: # In verbose mode, use logger.info for the summary block
+         for line in summary_lines:
+              logger.info(line)
+
+
+    return duration_for_pbar_update # Return the duration actually used for the pbar update
 
 
 if __name__ == "__main__":
-    load_dotenv()  # Load environment variables from .env file
+    load_dotenv()
 
-    parser = argparse.ArgumentParser(description="Transcribe audio and summarize using AssemblyAI and xAI.")
-    parser.add_argument("audio_file", help="Name of the local MP3 audio file.")
+    parser = argparse.ArgumentParser(description="Transcribe and summarize audio/video from file, URL, or folder using AssemblyAI and xAI.")
+    parser.add_argument(
+        "input_source",
+        help="Path to a local audio/video file, a URL to a remote file, or a path to a folder containing audio/video files."
+    )
     parser.add_argument(
         "-s",
         "--speakers",
         type=int,
         default=3,
-        help="Expected number of speakers (optional, default is 3).",
+        help="Expected number of speakers (optional, default is 3). Applies to all files if input is a folder.",
     )
     parser.add_argument(
         "--force-transcribe",
@@ -600,88 +986,246 @@ if __name__ == "__main__":
         action="store_true",
         help="Force re-summarization even if summary exists.",
     )
-    # Add max_tokens argument
     parser.add_argument(
         "--max-tokens",
         type=int,
         default=10000,
         help="Maximum number of tokens for the xAI summarization model (default: 10000).",
     )
+    parser.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Enable verbose logging for detailed output.",
+    )
     args = parser.parse_args()
 
-    audio_filename = args.audio_file
+    input_source = args.input_source
     expected_speakers = args.speakers
     force_transcribe = args.force_transcribe
     force_summarize = args.force_summarize
-    max_tokens = args.max_tokens  # Get the value
+    max_tokens = args.max_tokens
+    verbose_logging = args.verbose
 
-    audio_file_path = find_audio_file(audio_filename)
+    # --- Configure Logging Handler and Formatter based on verbosity ---
+    # Remove existing handlers first
+    if logger.handlers:
+        for handler in logger.handlers:
+            logger.removeHandler(handler)
 
-    if not audio_file_path:
-        print(f"Error: Audio file '{audio_filename}' not found.")
-        exit(1)  # Use non-zero exit code for errors
+    # Add a standard console handler for verbose mode or the custom handler for non-verbose WARNING/ERROR
+    if verbose_logging:
+        logger.setLevel(logging.DEBUG)
+        logging.getLogger("requests").setLevel(logging.DEBUG)
+        logging.getLogger("urllib3").setLevel(logging.DEBUG)
 
-    if os.path.getsize(audio_file_path) > 2 * 60 * 60 * 1024 * 1024:  # 2 hours limit in bytes
-        print("Error: Audio file size exceeds 2 hour limit (approx 2GB).")
-        print("Consider splitting the audio into smaller chunks.")
-        exit(1)  # Use non-zero exit code for errors
+        console_handler = logging.StreamHandler(sys.stdout)
+        console_handler.setLevel(logging.DEBUG)
+        console_handler.setFormatter(formatter_verbose)
+        logger.addHandler(console_handler)
+        # Ensure requests/urllib3 also use this handler
+        for req_handler in logging.getLogger("requests").handlers: logging.getLogger("requests").removeHandler(req_handler)
+        for url_handler in logging.getLogger("urllib3").handlers: logging.getLogger("urllib3").removeHandler(url_handler)
+        logging.getLogger("requests").addHandler(console_handler)
+        logging.getLogger("urllib3").addHandler(console_handler)
 
-    output_filename = os.path.splitext(audio_file_path)[0] + TRANSCRIPT_FILENAME_SUFFIX
-    output_data = load_output_data(output_filename)  # Load data at the start
 
-    # --- Get Audio Date/Time ---
-    audio_datetime_str = None
-    try:
-        # Using modification time as a proxy for recording date/time
-        mtime = os.path.getmtime(audio_file_path)
-        audio_datetime_str = datetime.datetime.fromtimestamp(mtime).strftime("%Y-%m-%d %H:%M:%S")  # Format date/time
-        print(f"Detected audio file date/time: {audio_datetime_str}")
-        # Store date/time in output_data if not already present or if forcing
-        if "audio_info" not in output_data or force_transcribe or force_summarize:
-            output_data["audio_info"] = {"recorded_datetime": audio_datetime_str}
-            # Save immediately after adding date, in case later steps fail
-            save_output_data(output_filename, output_data)
-            print(f"Audio info saved to '{output_filename}'.")
+        tenacity.before_sleep_log(logger, logging.DEBUG) # Log retries at DEBUG in verbose
 
-    except OSError as e:
-        print(f"Warning: Could not get file modification time for '{audio_file_path}': {e}")
-    except Exception as e:
-        print(f"Warning: An unexpected error occurred while getting audio date/time: {e}")
-
-    # --- Get API Keys once ---
-    assemblyai_api_key = get_assemblyai_api_key()
-    xai_api_key = get_xai_api_key()
-
-    # --- Transcription ---
-    # Pass the key to the transcription function
-    # transcribe updates output_data and saves.
-    # The function returns the segments list (either new or loaded)
-    transcript_segments = transcribe_audio_with_diarization(
-        audio_file_path, assemblyai_api_key, expected_speakers, force=force_transcribe
-    )
-
-    # --- Summarization ---
-    # summarize receives the transcript_segments returned by transcribe
-    # It will load the latest output_data internally (which includes audio_info and potentially existing transcript)
-    # before adding summary/usage and updating the segments with names
-    if transcript_segments:
-        if xai_api_key:
-            # Get the model dynamically with updated preference patterns and list all models
-            selected_model = get_latest_xai_model(xai_api_key)
-            if selected_model:
-                # Pass the key, the selected model, audio_datetime_str, AND max_tokens to summarization
-                summarize_transcript_with_xai(
-                    transcript_segments,
-                    audio_file_path,
-                    xai_api_key,
-                    selected_model,
-                    audio_datetime_str=audio_datetime_str,
-                    force=force_summarize,
-                    max_tokens=max_tokens,
-                )
-            else:
-                print("Could not determine a suitable xAI model from the available list. Skipping summarization.")
-        else:
-            print("xAI API key not available. Skipping summarization.")
     else:
-        print("Transcription failed. Skipping summarization.")
+        # Non-verbose: Logger only for WARNING/ERROR, use TqdmWarningErrorHandler
+        # Set logger level to INFO so logger.isEnabledFor(logging.INFO) is true for conditional prints
+        # However, our TqdmWarningErrorHandler still only processes WARNING/ERROR
+        logger.setLevel(logging.INFO) # Set to INFO so isEnabledFor works
+
+        logging.getLogger("requests").setLevel(logging.WARNING)
+        logging.getLogger("urllib3").setLevel(logging.WARNING)
+
+        # The warning_error_handler instance needs to be accessible globally or passed
+        # Let's create it here and pass it to the main processing logic if needed
+        # However, directly updating its pbar attribute in the main block is simpler
+        # as done below. The handler is already added to the logger here.
+        # warning_error_handler = TqdmWarningErrorHandler(level=logging.WARNING) # Instance created globally now
+        warning_error_handler.setLevel(logging.WARNING) # Ensure correct level
+        warning_error_handler.setFormatter(formatter_non_verbose) # Ensure correct formatter
+        # Handler is already added above...
+
+
+        tenacity.before_sleep_log(logger, logging.WARNING) # Log retries at WARNING in non-verbose
+
+
+    # Get API keys AFTER configuring handlers so prompts use correct output
+    assemblyai_api_key = get_assemblyai_api_key()
+    xai_api_key = get_xai_api_key() # Get xAI key once
+
+
+    if not assemblyai_api_key:
+        logger.error("AssemblyAI API key is required for transcription. Please set ASSEMBLYAI_API_KEY environment variable or provide it when prompted.")
+        sys.exit(1)
+
+    # Initial processing message - use print/tqdm.write in non-verbose
+    if logger.isEnabledFor(logging.INFO): # Check if in non-verbose (INFO enabled)
+         print(f"Processing input source: {input_source}", flush=True)
+    else:
+         logger.info(f"Processing input source: {input_source}") # Use logger info in verbose
+
+
+    overall_pbar = None # Initialize overall progress bar to None
+
+    if input_source.lower().startswith(('http://', 'https://')):
+        # Input source type message - use print/tqdm.write in non-verbose
+        if logger.isEnabledFor(logging.INFO):
+            print("Input source type: URL", flush=True)
+        else:
+            logger.info("Input source type: URL") # Use logger info in verbose
+
+        # Pass None for overall_pbar to download function - download has its own tqdm bar
+        downloaded_file_path = download_file_from_url(input_source, overall_pbar=None)
+        if downloaded_file_path:
+            ext = os.path.splitext(downloaded_file_path)[1].lower()
+            if ext in SUPPORTED_EXTENSIONS:
+                 # Process single downloaded file - no overall bar here
+                 process_single_file(downloaded_file_path, assemblyai_api_key, xai_api_key, expected_speakers, force_transcribe, force_summarize, max_tokens, overall_pbar=None)
+            else:
+                 logger.warning(f"Downloaded file format '{ext}' is not explicitly listed as supported by AssemblyAI. Skipping processing.")
+                 logger.debug(f"Supported extensions include: {', '.join(sorted(SUPPORTED_EXTENSIONS))}") # Debug only
+                 try:
+                     os.remove(downloaded_file_path)
+                     logger.debug(f"Cleaned up unsupported downloaded file: {downloaded_file_path}") # Debug only
+                 except OSError as e:
+                     logger.warning(f"Error removing downloaded file {downloaded_file_path}: {e}")
+
+    elif os.path.isdir(input_source):
+        # Input source type message - use print/tqdm.write in non-verbose
+        if logger.isEnabledFor(logging.INFO):
+             print("Input source type: Folder", flush=True)
+        else:
+             logger.info("Input source type: Folder") # Use logger info in verbose
+
+        supported_files_in_folder = []
+        unsupported_files_in_folder = []
+        total_duration = 0
+
+        # Scanning folder message - use print/tqdm.write in non-verbose
+        if logger.isEnabledFor(logging.INFO):
+             print("Scanning folder for supported files and calculating total duration...", flush=True)
+        else:
+             logger.info("Scanning folder for supported files and calculating total duration...") # Use logger info in verbose
+
+
+        for root, _, files in os.walk(input_source):
+            for file in files:
+                file_path = os.path.join(root, file)
+                ext = os.path.splitext(file_path)[1].lower()
+                if ext in SUPPORTED_EXTENSIONS:
+                    supported_files_in_folder.append(file_path)
+                    duration = get_audio_duration(file_path)
+                    if duration is not None:
+                        total_duration += duration
+                        logger.debug(f"Added duration {duration:.2f}s for {os.path.basename(file_path)}. Current total: {total_duration:.2f}s") # Debug only
+                    else:
+                        logger.debug(f"Could not get duration for {os.path.basename(file_path)} upfront using mutagen/tinytag. Progress for this file will be best-effort.") # Debug only
+                else:
+                     unsupported_files_in_folder.append(file_path)
+
+        if unsupported_files_in_folder:
+             logger.warning(f"\nSkipping {len(unsupported_files_in_folder)} files in the folder due to unsupported extensions:") # Keep warning
+             for uf in unsupported_files_in_folder:
+                  logger.warning(f"- {os.path.basename(uf)}") # Keep warning
+             logger.warning("-" * 20) # Keep warning
+
+        if not supported_files_in_folder:
+            logger.warning(f"No supported audio/video files found in the folder '{input_source}' or its subdirectories.") # Keep warning
+        else:
+            # Found files message - use print/tqdm.write in non-verbose
+            if logger.isEnabledFor(logging.INFO):
+                 print(f"Found {len(supported_files_in_folder)} supported files in '{input_source}'.", flush=True)
+            else:
+                 logger.info(f"Found {len(supported_files_in_folder)} supported files in '{input_source}'.") # Use logger info in verbose
+
+
+            if total_duration > 0 and logger.isEnabledFor(logging.INFO): # Check INFO level for pbar activation
+                # Total duration message - use print/tqdm.write in non-verbose
+                if logger.isEnabledFor(logging.INFO):
+                     print(f"Total detected audio duration: {format_duration(total_duration)}", flush=True)
+                else:
+                     logger.info(f"Total detected audio duration: {format_duration(total_duration)}") # Use logger info in verbose
+
+                # Initialize the overall progress bar - disabled if logger level is above INFO
+                # Changed unit_scale to False to display raw seconds
+                overall_pbar = tqdm(
+                    total=total_duration,
+                    unit='s',
+                    unit_scale=False,
+                    desc="Overall Progress",
+                    leave=True,
+                    disable=not logger.isEnabledFor(logging.INFO),
+                    file=sys.stdout
+                )
+
+                # Update the custom logging handler with the active progress bar
+                for handler in logger.handlers:
+                    if isinstance(handler, TqdmWarningErrorHandler):
+                        handler.overall_pbar = overall_pbar
+                        break
+
+            else:
+                overall_pbar = None
+                if total_duration == 0 and logger.isEnabledFor(logging.WARNING): # Check WARNING level for message
+                     logger.warning("Could not detect duration for any supported files upfront. Overall duration progress bar disabled.") # Keep warning
+
+
+            for i, file_path in enumerate(supported_files_in_folder):
+                 # process_single_file manages its own status display and updates the overall_pbar
+                 process_single_file(
+                      file_path,
+                      assemblyai_api_key,
+                      xai_api_key,
+                      expected_speakers,
+                      force_transcribe,
+                      force_summarize,
+                      max_tokens,
+                      overall_pbar=overall_pbar, # Pass the progress bar instance
+                      file_index=i + 1,
+                      total_files=len(supported_files_in_folder)
+                 )
+
+            # Clear any potential leftover dynamic status line before closing bar
+            if overall_pbar is not None and not overall_pbar.disable:
+                 print(" " * 80, end='\r', flush=True)
+
+
+            if overall_pbar:
+                 overall_pbar.close()
+                 print("", flush=True) # Ensure newline after bar
+
+            # Reset the overall_pbar in the handler after processing all files
+            for handler in logger.handlers:
+                 if isinstance(handler, TqdmWarningErrorHandler):
+                      handler.overall_pbar = None
+                      break
+
+
+    elif os.path.isfile(input_source):
+        # Input source type message - use print/tqdm.write in non-verbose
+        if logger.isEnabledFor(logging.INFO):
+             print("Input source type: Local File", flush=True)
+        else:
+             logger.info("Input source type: Local File") # Use logger info in verbose
+
+        ext = os.path.splitext(input_source)[1].lower()
+        if ext in SUPPORTED_EXTENSIONS:
+            process_single_file(input_source, assemblyai_api_key, xai_api_key, expected_speakers, force_transcribe, force_summarize, max_tokens, overall_pbar=None)
+        else:
+            logger.warning(f"Local file format '{ext}' is not explicitly listed as supported by AssemblyAI. Skipping processing.") # Keep warning
+            logger.debug(f"Supported extensions include: {', '.join(sorted(SUPPORTED_EXTENSIONS))}") # Debug only
+
+    else:
+        logger.error(f"Error: Input source '{input_source}' is not a valid URL, file path, or folder path.") # Keep error
+        parser.print_help()
+        sys.exit(1)
+
+    # Final processing complete message - use print/tqdm.write in non-verbose
+    if logger.isEnabledFor(logging.INFO):
+        print("Processing complete.", flush=True)
+    else:
+        logger.info("Processing complete.") # Use logger info in verbose
