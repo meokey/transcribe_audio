@@ -2,7 +2,7 @@
 
 **This project was written by Gemini 2.5 Flash LLM by Google.**
 
-A Python script designed to automate the transcription of local audio files with speaker diarization using AssemblyAI, followed by summarization of the transcript using a dynamically selected xAI large language model. The script saves the detailed transcript (with potential speaker names), the generated summary, and process metadata (like audio date/time and xAI usage) to a structured JSON file. It includes robust error handling and retry mechanisms for API calls.
+A Python script designed to automate the transcription of local audio files with speaker diarization using AssemblyAI, followed by summarization of the transcript using a dynamically selected xAI large language model. The script saves the detailed transcript (with potential speaker names), the generated summary, and process metadata (like audio date/time and xAI usage) to a structured JSON file. It includes robust error handling and retry mechanisms for API calls. Recent enhancements have further improved its processing speed for batch tasks and overall operational robustness.
 
 ## License
 
@@ -35,6 +35,8 @@ Please see the full [LICENSE](LICENSE) file for details.
 * **Idempotency:** Checks for existing output data and skips transcription/summarization by default unless forced, saving time and API costs.
 * **Secure API Key Handling:** Supports loading API keys from environment variables (`.env` file) or securely prompting the user via the command line.
 * **Configurable Summary Length:** Allows setting the maximum number of tokens for the xAI summary response via a command-line argument.
+* **Concurrent Folder Processing:** Processes multiple files within a folder concurrently (using a configurable number of worker threads via the `--num-workers` argument) to significantly speed up batch operations.
+* **Enhanced Robustness & Efficiency:** Improved internal handling of optional dependency installations (using `subprocess` instead of `os.system`), more robust file download logic (including Content-Disposition handling and better fallback mechanisms), and optimized API key/model fetching to reduce redundant calls.
 * **Verbose Logging:** Use the `--verbose` flag for detailed, step-by-step output during processing.
 
 ## Technology Stack
@@ -103,6 +105,7 @@ python src/transcribe_audio_app/transcribe_audio.py <audio_file> [options]
 2. [options] (Optional):
 
 * -s SPEAKER_COUNT, --speakers SPEAKER_COUNT: Expected number of speakers in the audio. Providing an accurate number can improve AssemblyAI's diarization accuracy. Defaults to 3.
+* --num-workers NUM_WORKERS: Number of concurrent worker threads for processing files when a folder is provided as input. Defaults to 3.
 * --force-transcribe: Forces the script to re-run the transcription using AssemblyAI, even if existing transcript data is found in the output file.
 * --force-summarize: Forces the script to re-run the summarization using xAI, even if existing summary and usage data are found in the output file.
 * --max-tokens MAX_TOKENS: Maximum number of tokens the xAI model should generate for the summary. Adjust this value based on the desired summary length and model limitations. Defaults to 10000.
