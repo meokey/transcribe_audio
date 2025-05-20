@@ -12,41 +12,63 @@ import logging
 import sys
 import time
 import math
+import subprocess
+import concurrent.futures
 
 # Check for tqdm and install if necessary
 try:
     from tqdm import tqdm
 except ImportError:
     print("Installing tqdm for progress bars...")
-    os.system(f"{sys.executable} -m pip install tqdm")
-    from tqdm import tqdm
+    result = subprocess.run([sys.executable, "-m", "pip", "install", "tqdm"], capture_output=True, text=True, check=False)
+    if result.returncode == 0:
+        from tqdm import tqdm
+        print("tqdm installed successfully.")
+    else:
+        print(f"WARNING: tqdm installation failed. Progress bars will not be available. Error: {result.stderr}", file=sys.stderr)
+        # Define a dummy tqdm if installation fails so the script doesn't crash
+        def tqdm(iterable, *args, **kwargs):
+            return iterable
 
 # Check for mutagen and install if necessary
 try:
     from mutagen import File as MutagenFile
 except ImportError:
     print("Installing mutagen for audio/video metadata detection (attempt 1/2)...")
-    os.system(f"{sys.executable} -m pip install mutagen")
-    try:
-        from mutagen import File as MutagenFile
-        print("Mutagen installed successfully.")
-    except ImportError:
+    result = subprocess.run([sys.executable, "-m", "pip", "install", "mutagen"], capture_output=True, text=True, check=False)
+    if result.returncode == 0:
+        try:
+            from mutagen import File as MutagenFile
+            print("Mutagen installed successfully.")
+        except ImportError:
+            MutagenFile = None
+            print("WARNING: Mutagen installed but could not be imported. Duration detection might be affected.", file=sys.stderr)
+    else:
         MutagenFile = None
-        print("Mutagen installation failed.")
+        print(f"WARNING: Mutagen installation failed. Duration detection might be affected. Error: {result.stderr}", file=sys.stderr)
 
 # Check for tinytag and install if necessary
 try:
     from tinytag import TinyTag
 except ImportError:
     print("Installing tinytag for audio metadata detection (attempt 2/2)...")
-    os.system(f"{sys.executable} -m pip install tinytag")
-    try:
-        from tinytag import TinyTag
-        print("Tinytag installed successfully.")
-    except ImportError:
+    result = subprocess.run([sys.executable, "-m", "pip", "install", "tinytag"], capture_output=True, text=True, check=False)
+    if result.returncode == 0:
+        try:
+            from tinytag import TinyTag
+            print("Tinytag installed successfully.")
+        except ImportError:
+            TinyTag = None
+            print("WARNING: Tinytag installed but could not be imported. Duration detection might be affected.", file=sys.stderr)
+    else:
         TinyTag = None
-        print("Tinytag installation failed.")
+        print(f"WARNING: Tinytag installation failed. Duration detection might be affected. Error: {result.stderr}", file=sys.stderr)
 
+
+# --- Global Variables for Caching ---
+_ASSEMBLYAI_API_KEY = None
+_XAI_API_KEY = None
+_SELECTED_XAI_MODEL = None
 
 # --- Configuration ---
 XAI_API_BASE_URL = "https://api.x.ai"
@@ -216,93 +238,176 @@ def save_output_data(filepath, data):
 
 
 def get_assemblyai_api_key():
-    """Gets the AssemblyAI API key from environment variables or asks the user with masking."""
+    """Gets the AssemblyAI API key from environment variables or asks the user with masking. Caches the key globally."""
+    global _ASSEMBLYAI_API_KEY
+    if _ASSEMBLYAI_API_KEY:
+        return _ASSEMBLYAI_API_KEY
+
     api_key = os.environ.get("ASSEMBLYAI_API_KEY")
     if not api_key:
         # Use standard print for getpass prompt
         print("Please enter your AssemblyAI API key for transcription: ", end="", flush=True)
         api_key = getpass.getpass("")
+    
+    _ASSEMBLYAI_API_KEY = api_key
     return api_key
 
 
 def get_xai_api_key():
-    """Gets the xAI API key from environment variables or asks the user with masking."""
+    """Gets the xAI API key from environment variables or asks the user with masking. Caches the key globally."""
+    global _XAI_API_KEY
+    if _XAI_API_KEY:
+        return _XAI_API_KEY
+
     api_key = os.environ.get("XAI_API_KEY")
     if not api_key:
         print("Please enter your xAI API key for summarization: ", end="", flush=True)
         api_key = getpass.getpass("")
+    
+    _XAI_API_KEY = api_key
     return api_key
 
 # --- Function to Download File from URL ---
 def download_file_from_url(url, download_folder=DOWNLOAD_FOLDER, overall_pbar=None):
-    """Downloads a file from a given URL to a specified folder."""
+    """Downloads a file from a given URL to a specified folder with improved robustness."""
     os.makedirs(download_folder, exist_ok=True)
-    local_filename = url.split('/')[-1]
-    local_filename = re.sub(r'[^\w.-]', '_', local_filename)
-    if not local_filename or '.' not in local_filename:
-         local_filename = f"downloaded_file_{int(time.time())}" + os.path.splitext(url)[1]
-
-    filepath = os.path.join(download_folder, local_filename)
-
-    # Use print or tqdm.write for INFO messages in non-verbose
-    if logger.isEnabledFor(logging.INFO): # Check if in non-verbose mode
-         if overall_pbar and not overall_pbar.disable:
-              overall_pbar.write(f"Downloading {os.path.basename(filepath)}...")
-              overall_pbar.refresh()
-         else:
-              print(f"Downloading {os.path.basename(filepath)}...", flush=True)
-
-
-    logger.debug(f"Attempting to download from {url} to {filepath}") # Debug only
+    
+    local_filename = None
+    file_extension = None
 
     try:
+        # Perform a HEAD request first to get headers like Content-Disposition and Content-Type
+        # Allow redirects as the final URL might have the correct headers or extension
+        response_head = requests.head(url, allow_redirects=True, timeout=10) # Added timeout
+        response_head.raise_for_status() # Check for HTTP errors on HEAD request
+
+        # 1. Try Content-Disposition
+        if 'content-disposition' in response_head.headers:
+            disposition = response_head.headers['content-disposition']
+            filenames = re.findall('filename="?([^"]+)"?', disposition)
+            if filenames:
+                local_filename = filenames[0]
+                logger.debug(f"Filename from Content-Disposition: {local_filename}")
+
+        # 2. If no filename from Content-Disposition, parse from URL
+        if not local_filename:
+            local_filename = url.split('/')[-1].split('?')[0] # Remove query params for filename
+            logger.debug(f"Filename from URL path: {local_filename}")
+
+        # Sanitize the filename
+        local_filename = re.sub(r'[^\w.-]', '_', local_filename)
+        
+        # Extract extension
+        if local_filename and '.' in local_filename:
+            name_part, ext_part = os.path.splitext(local_filename)
+            if ext_part: # Ensure ext_part is not just '.'
+                 file_extension = ext_part
+                 local_filename = name_part # Keep local_filename as base name for now
+        
+        # If no extension from filename, try from URL
+        if not file_extension:
+            url_path = requests.utils.urlparse(url).path
+            name_part_url, ext_part_url = os.path.splitext(url_path)
+            if ext_part_url:
+                file_extension = ext_part_url
+                logger.debug(f"Extension from URL: {file_extension}")
+
+        # If still no extension, try Content-Type (MIME type to extension mapping)
+        if not file_extension and 'content-type' in response_head.headers:
+            content_type = response_head.headers['content-type'].split(';')[0]
+            # Basic mapping, can be expanded
+            mime_map = {
+                'audio/mpeg': '.mp3', 'audio/wav': '.wav', 'audio/aac': '.aac', 'audio/ogg': '.ogg',
+                'audio/flac': '.flac', 'audio/x-m4a': '.m4a', 'video/mp4': '.mp4', 'video/quicktime': '.mov',
+                'video/x-ms-wmv': '.wmv', 'video/x-matroska': '.mkv', 'video/webm': '.webm'
+            }
+            if content_type in mime_map:
+                file_extension = mime_map[content_type]
+                logger.debug(f"Extension from Content-Type ({content_type}): {file_extension}")
+
+        # 3. Fallback for filename body if still problematic
+        if not local_filename or local_filename.startswith('.') or local_filename in ('.', '..'):
+            local_filename = f"downloaded_file_{int(time.time())}"
+            logger.debug(f"Using fallback filename body: {local_filename}")
+
+        # Append extension; if no extension found, default to .tmp or leave extensionless
+        # For this script, a media extension is important, so if none, it might be an issue.
+        # Defaulting to .tmp if totally unknown, or consider not adding if truly not found.
+        file_extension = file_extension if file_extension and file_extension.startswith('.') else ".download" # Ensure extension starts with a dot
+        
+        final_filename = local_filename + file_extension
+        filepath = os.path.join(download_folder, final_filename)
+
+        # Use print or tqdm.write for INFO messages in non-verbose
+        if logger.isEnabledFor(logging.INFO): # Check if in non-verbose mode
+            if overall_pbar and not overall_pbar.disable:
+                overall_pbar.write(f"Downloading {os.path.basename(filepath)}...")
+                overall_pbar.refresh()
+            else:
+                print(f"Downloading {os.path.basename(filepath)}...", flush=True)
+        logger.debug(f"Attempting to download from {url} to {filepath}")
+
         # Use tqdm for download progress - disabled if not in INFO mode
         with tqdm(total=None, unit='B', unit_scale=True, desc=f"Download Progress", leave=False, disable=not logger.isEnabledFor(logging.INFO), file=sys.stdout) as pbar:
-            try:
-                 response_head = requests.head(url, allow_redirects=True)
-                 total_size = int(response_head.headers.get('content-length', 0))
-                 if total_size > 0:
-                     pbar.total = total_size
-            except Exception as e:
-                 logger.debug(f"Could not get content length for download: {e}") # Debug only
-                 pbar.total = None
+            # Get total size from HEAD request if available
+            total_size = int(response_head.headers.get('content-length', 0))
+            if total_size > 0:
+                pbar.total = total_size
+            else:
+                pbar.total = None # Will show progress without percentage
 
-            with requests.get(url, stream=True) as r:
-                r.raise_for_status()
+            with requests.get(url, stream=True, timeout=60) as r: # Added timeout
+                r.raise_for_status() # Check for HTTP errors on GET request
 
                 block_size = 8192
-
                 with open(filepath, 'wb') as f:
                     for chunk in r.iter_content(chunk_size=block_size):
                         if chunk:
                             pbar.update(len(chunk))
-
+        
         # Clear the download progress bar line if it was active and not completed
         if logger.isEnabledFor(logging.INFO) and (pbar.total is None or pbar.n < (pbar.total or 1)):
              print(" " * 80, end='\r', flush=True)
 
-        # Use print or tqdm.write for download complete message in non-verbose
         if logger.isEnabledFor(logging.INFO):
-             if overall_pbar and not overall_pbar.disable:
-                  overall_pbar.write(f"Download complete: {os.path.basename(filepath)}")
-                  overall_pbar.refresh()
-             else:
-                  print(f"Download complete: {os.path.basename(filepath)}", flush=True)
-
-
-        logger.debug(f"Downloaded file path: {filepath}") # Debug only
+            if overall_pbar and not overall_pbar.disable:
+                overall_pbar.write(f"Download complete: {os.path.basename(filepath)}")
+                overall_pbar.refresh()
+            else:
+                print(f"Download complete: {os.path.basename(filepath)}", flush=True)
+        logger.debug(f"Downloaded file path: {filepath}")
         return filepath
-    except requests.exceptions.RequestException as e:
-        logger.error(f"Error downloading file from {url}: {e}") # Keep error
+
+    except requests.exceptions.Timeout as e:
+        logger.error(f"Download timed out for URL: {url}. Error: {e}")
+        return None
+    except requests.exceptions.ConnectionError as e:
+        logger.error(f"Connection error while downloading URL: {url}. Error: {e}")
+        return None
+    except requests.exceptions.HTTPError as e: # Catch HTTP errors from HEAD or GET
+        logger.error(f"HTTP error downloading file from {url}: {e}")
         if hasattr(e, 'response') and e.response is not None:
-             logger.debug(f"Download HTTP Status: {e.response.status_code}") # Debug only
+             logger.debug(f"Download HTTP Status: {e.response.status_code}")
              try:
-                 logger.debug(f"Download Response Body: {e.response.json()}") # Debug only
+                 logger.debug(f"Download Response Body: {e.response.json()}")
              except json.JSONDecodeError:
-                 logger.debug(f"Download Response Body (non-JSON): {e.cause.response.text}") # Debug only
+                 logger.debug(f"Download Response Body (non-JSON): {e.response.text if e.response.text else 'Empty'}")
+        return None
+    except requests.exceptions.RequestException as e: # Catch other request-related errors
+        logger.error(f"Error downloading file from {url}: {e}")
+        if hasattr(e, 'response') and e.response is not None:
+             logger.debug(f"Download HTTP Status: {e.response.status_code}")
+             try:
+                 logger.debug(f"Download Response Body: {e.response.json()}")
+             except json.JSONDecodeError:
+                 # Check if e.cause is available and has response for more specific logging if needed
+                 response_text = e.response.text if hasattr(e.response, 'text') else 'Empty'
+                 if not response_text and hasattr(e, 'cause') and hasattr(e.cause, 'response') and hasattr(e.cause.response, 'text'):
+                     response_text = e.cause.response.text
+                 logger.debug(f"Download Response Body (non-JSON): {response_text if response_text else 'Empty'}")
         return None
     except Exception as e:
-        logger.error(f"An unexpected error occurred during download: {e}") # Keep error
+        logger.error(f"An unexpected error occurred during download of {url}: {e}")
         return None
 
 
@@ -475,8 +580,12 @@ def fetch_xai_models_with_retry():
 def get_latest_xai_model():
     """
     Fetches the list of available xAI models, logs the list (at debug level),
-    and selects a model based on priority. Gets API key internally.
+    and selects a model based on priority. Gets API key internally and caches the selected model.
     """
+    global _SELECTED_XAI_MODEL
+    if _SELECTED_XAI_MODEL:
+        return _SELECTED_XAI_MODEL
+
     api_key = get_xai_api_key()
     if not api_key:
          logger.warning("xAI API key not available for model selection. Skipping.") # Keep warning
@@ -534,6 +643,7 @@ def get_latest_xai_model():
             if pattern in available_models:
                 selected_model = pattern
                 logger.debug(f"Step: Selected model matching pattern: {selected_model}") # Debug only
+                _SELECTED_XAI_MODEL = selected_model
                 return selected_model
 
         logger.debug(f"None of the prioritized grok-{highest_number} patterns found.") # Debug only
@@ -545,6 +655,7 @@ def get_latest_xai_model():
     if fallback_specific in available_models:
         selected_model = fallback_specific
         logger.debug(f"Step: Falling back to specific model: {selected_model}") # Debug only
+        _SELECTED_XAI_MODEL = selected_model
         return fallback_specific
 
     if available_models:
@@ -552,6 +663,7 @@ def get_latest_xai_model():
         logger.warning( # Keep warning for fallback model selection
             f"Neither prioritized grok patterns nor '{fallback_specific}' found. Falling back to selecting the first available model: {selected_model}"
         )
+        _SELECTED_XAI_MODEL = selected_model
         return selected_model
     else:
         logger.error("No available models found to select from.") # Keep error
@@ -770,7 +882,7 @@ Transcript:
         return None, None
 
 # --- Function to process a single file ---
-def process_single_file(file_path, assemblyai_api_key, xai_api_key, expected_speakers, force_transcribe, force_summarize, max_tokens, overall_pbar=None, file_index=None, total_files=None):
+def process_single_file(file_path, assemblyai_api_key, xai_api_key, selected_xai_model, expected_speakers, force_transcribe, force_summarize, max_tokens, overall_pbar=None, file_index=None, total_files=None):
     """Processes a single audio/video file."""
 
     # Prepare file status description prefix for tqdm bar
@@ -878,14 +990,13 @@ def process_single_file(file_path, assemblyai_api_key, xai_api_key, expected_spe
                   print(f"{file_status_prefix} {status_msg}", end='\r', flush=True)
 
 
-        if xai_api_key:
-            selected_model = get_latest_xai_model() # Get key internally now
-            if selected_model:
+        if xai_api_key: # Check if xAI key is available
+            if selected_xai_model: # Check if a model was successfully selected and passed
                 summary, xai_usage_data = summarize_transcript_with_xai( # Capture usage data
                     transcript_segments,
                     file_path,
-                    xai_api_key,
-                    selected_model,
+                    xai_api_key, # Pass the key
+                    selected_xai_model, # Pass the pre-fetched model
                     audio_datetime_str=audio_datetime_str,
                     force=force_summarize,
                     max_tokens=max_tokens,
@@ -893,7 +1004,7 @@ def process_single_file(file_path, assemblyai_api_key, xai_api_key, expected_spe
                     file_status_desc=file_status_prefix # Pass file status prefix
                 )
             else:
-                logger.warning("Could not determine a suitable xAI model. Skipping summarization.") # Keep warning
+                logger.warning("A suitable xAI model was not provided or could not be determined. Skipping summarization.") # Keep warning
         else:
             logger.warning("xAI API key not available. Skipping summarization.") # Keep warning
     else:
@@ -997,6 +1108,12 @@ if __name__ == "__main__":
         action="store_true",
         help="Enable verbose logging for detailed output.",
     )
+    parser.add_argument(
+        "--num-workers",
+        type=int,
+        default=3,
+        help="Number of concurrent workers for processing files in folder mode (default: 3).",
+    )
     args = parser.parse_args()
 
     input_source = args.input_source
@@ -1005,6 +1122,7 @@ if __name__ == "__main__":
     force_summarize = args.force_summarize
     max_tokens = args.max_tokens
     verbose_logging = args.verbose
+    num_workers = args.num_workers
 
     # --- Configure Logging Handler and Formatter based on verbosity ---
     # Remove existing handlers first
@@ -1054,9 +1172,10 @@ if __name__ == "__main__":
 
 
     # Get API keys AFTER configuring handlers so prompts use correct output
+    # These will now use the caching mechanism
     assemblyai_api_key = get_assemblyai_api_key()
-    xai_api_key = get_xai_api_key() # Get xAI key once
-
+    xai_api_key = get_xai_api_key() 
+    selected_xai_model = None # Initialize
 
     if not assemblyai_api_key:
         logger.error("AssemblyAI API key is required for transcription. Please set ASSEMBLYAI_API_KEY environment variable or provide it when prompted.")
@@ -1083,8 +1202,11 @@ if __name__ == "__main__":
         if downloaded_file_path:
             ext = os.path.splitext(downloaded_file_path)[1].lower()
             if ext in SUPPORTED_EXTENSIONS:
+                 # Fetch model only if we have a valid file to process and xAI key is present
+                 if xai_api_key:
+                     selected_xai_model = get_latest_xai_model()
                  # Process single downloaded file - no overall bar here
-                 process_single_file(downloaded_file_path, assemblyai_api_key, xai_api_key, expected_speakers, force_transcribe, force_summarize, max_tokens, overall_pbar=None)
+                 process_single_file(downloaded_file_path, assemblyai_api_key, xai_api_key, selected_xai_model, expected_speakers, force_transcribe, force_summarize, max_tokens, overall_pbar=None)
             else:
                  logger.warning(f"Downloaded file format '{ext}' is not explicitly listed as supported by AssemblyAI. Skipping processing.")
                  logger.debug(f"Supported extensions include: {', '.join(sorted(SUPPORTED_EXTENSIONS))}") # Debug only
@@ -1150,6 +1272,10 @@ if __name__ == "__main__":
                 else:
                      logger.info(f"Total detected audio duration: {format_duration(total_duration)}") # Use logger info in verbose
 
+            # Fetch xAI model once before processing folder if xAI key is present
+            if xai_api_key:
+                selected_xai_model = get_latest_xai_model()
+
                 # Initialize the overall progress bar - disabled if logger level is above INFO
                 # Changed unit_scale to False to display raw seconds
                 overall_pbar = tqdm(
@@ -1173,21 +1299,39 @@ if __name__ == "__main__":
                 if total_duration == 0 and logger.isEnabledFor(logging.WARNING): # Check WARNING level for message
                      logger.warning("Could not detect duration for any supported files upfront. Overall duration progress bar disabled.") # Keep warning
 
-
-            for i, file_path in enumerate(supported_files_in_folder):
-                 # process_single_file manages its own status display and updates the overall_pbar
-                 process_single_file(
-                      file_path,
-                      assemblyai_api_key,
-                      xai_api_key,
-                      expected_speakers,
-                      force_transcribe,
-                      force_summarize,
-                      max_tokens,
-                      overall_pbar=overall_pbar, # Pass the progress bar instance
-                      file_index=i + 1,
-                      total_files=len(supported_files_in_folder)
-                 )
+            if supported_files_in_folder:
+                with concurrent.futures.ThreadPoolExecutor(max_workers=num_workers) as executor:
+                    futures = []
+                    for i, file_path in enumerate(supported_files_in_folder):
+                        futures.append(executor.submit(
+                            process_single_file,
+                            file_path=file_path,
+                            assemblyai_api_key=assemblyai_api_key, # Use fetched key
+                            xai_api_key=xai_api_key,             # Use fetched key
+                            selected_xai_model=selected_xai_model, # Use fetched model
+                            expected_speakers=expected_speakers,
+                            force_transcribe=force_transcribe,
+                            force_summarize=force_summarize,
+                            max_tokens=max_tokens,
+                            overall_pbar=overall_pbar,
+                            file_index=i + 1,
+                            total_files=len(supported_files_in_folder)
+                        ))
+                    
+                    for future in concurrent.futures.as_completed(futures):
+                        try:
+                            future.result() # Raise exceptions if any occurred in the thread
+                        except Exception as exc:
+                            # Log the exception. process_single_file does internal logging,
+                            # but this catches issues during task submission or unexpected errors.
+                            # Using overall_pbar.write ensures it's visible above the bar if active.
+                            error_message = f"A file processing task generated an unhandled exception: {exc}"
+                            if overall_pbar and not overall_pbar.disable:
+                                overall_pbar.write(error_message)
+                                overall_pbar.refresh()
+                            else:
+                                print(error_message, file=sys.stderr)
+                            logger.error(error_message, exc_info=True) # Log with stack trace for details
 
             # Clear any potential leftover dynamic status line before closing bar
             if overall_pbar is not None and not overall_pbar.disable:
@@ -1214,7 +1358,10 @@ if __name__ == "__main__":
 
         ext = os.path.splitext(input_source)[1].lower()
         if ext in SUPPORTED_EXTENSIONS:
-            process_single_file(input_source, assemblyai_api_key, xai_api_key, expected_speakers, force_transcribe, force_summarize, max_tokens, overall_pbar=None)
+            # Fetch model only if we have a valid file to process and xAI key is present
+            if xai_api_key:
+                selected_xai_model = get_latest_xai_model()
+            process_single_file(input_source, assemblyai_api_key, xai_api_key, selected_xai_model, expected_speakers, force_transcribe, force_summarize, max_tokens, overall_pbar=None)
         else:
             logger.warning(f"Local file format '{ext}' is not explicitly listed as supported by AssemblyAI. Skipping processing.") # Keep warning
             logger.debug(f"Supported extensions include: {', '.join(sorted(SUPPORTED_EXTENSIONS))}") # Debug only
