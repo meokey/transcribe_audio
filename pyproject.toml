@@ -32,7 +32,7 @@ dependencies = [
     "tenacity",
 	"yt-dlp",
     "mutagen",
-    "tinytog",
+    "tinytag",
     "tqdm"
 ]
 # Define optional/development dependencies
