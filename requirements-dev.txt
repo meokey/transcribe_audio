@@ -1,5 +1,5 @@
 # -r requirements.txt # Inherit all production dependencies
-# pytest            # For running tests
+pytest            # For running tests
 # pylint            # For static code analysis (linting)
 # black			  # Add your formatter here
 # You might add other dev tools here later, e.g.:

@@ -13,39 +13,27 @@ import sys
 import time
 import math
 
-# Check for tqdm and install if necessary
+# --- Dependency Checks ---
 try:
     from tqdm import tqdm
 except ImportError:
-    print("Installing tqdm for progress bars...")
-    os.system(f"{sys.executable} -m pip install tqdm")
-    from tqdm import tqdm
+    print("Error: 'tqdm' is not installed. Please install it by running 'pip install tqdm' or 'pip install -r requirements.txt'.", file=sys.stderr)
+    sys.exit(1)
 
-# Check for mutagen and install if necessary
 try:
     from mutagen import File as MutagenFile
 except ImportError:
-    print("Installing mutagen for audio/video metadata detection (attempt 1/2)...")
-    os.system(f"{sys.executable} -m pip install mutagen")
-    try:
-        from mutagen import File as MutagenFile
-        print("Mutagen installed successfully.")
-    except ImportError:
-        MutagenFile = None
-        print("Mutagen installation failed.")
+    MutagenFile = None # Gracefully handle if not installed, tinytag is a fallback
 
-# Check for tinytag and install if necessary
 try:
     from tinytag import TinyTag
 except ImportError:
-    print("Installing tinytag for audio metadata detection (attempt 2/2)...")
-    os.system(f"{sys.executable} -m pip install tinytag")
-    try:
-        from tinytag import TinyTag
-        print("Tinytag installed successfully.")
-    except ImportError:
-        TinyTag = None
-        print("Tinytag installation failed.")
+    TinyTag = None # Gracefully handle if not installed, mutagen is a fallback
+
+if MutagenFile is None and TinyTag is None:
+    print("Error: Neither 'mutagen' nor 'tinytag' is installed. At least one is required for local duration detection.", file=sys.stderr)
+    print("Please install them by running 'pip install mutagen tinytag' or 'pip install -r requirements.txt'.", file=sys.stderr)
+    sys.exit(1)
 
 
 # --- Configuration ---
@@ -457,9 +445,8 @@ def transcribe_audio_with_diarization(audio_file_path, assemblyai_api_key, num_s
 @tenacity.retry(
     retry=retry_if_transient_http_error | tenacity.retry_if_exception_type(requests.exceptions.RequestException)
 )
-def fetch_xai_models_with_retry():
+def fetch_xai_models_with_retry(api_key):
     """Fetches xAI models with retry logic."""
-    api_key = get_xai_api_key()
     if not api_key:
         logger.error("xAI API key not provided for fetching models.") # Keep error
         return None
@@ -472,12 +459,11 @@ def fetch_xai_models_with_retry():
     return response.json()
 
 
-def get_latest_xai_model():
+def get_latest_xai_model(api_key):
     """
     Fetches the list of available xAI models, logs the list (at debug level),
     and selects a model based on priority. Gets API key internally.
     """
-    api_key = get_xai_api_key()
     if not api_key:
          logger.warning("xAI API key not available for model selection. Skipping.") # Keep warning
          return None
@@ -485,7 +471,7 @@ def get_latest_xai_model():
     logger.debug("Step: Fetching list of available xAI models...") # Debug only
     available_models = []
     try:
-        models_data = fetch_xai_models_with_retry()
+        models_data = fetch_xai_models_with_retry(api_key)
 
         if not models_data or "data" not in models_data or not isinstance(models_data["data"], list):
             logger.error("Error: Unexpected response format from xAI models endpoint.") # Keep error
@@ -879,7 +865,7 @@ def process_single_file(file_path, assemblyai_api_key, xai_api_key, expected_spe
 
 
         if xai_api_key:
-            selected_model = get_latest_xai_model() # Get key internally now
+            selected_model = get_latest_xai_model(xai_api_key) # Get key internally now
             if selected_model:
                 summary, xai_usage_data = summarize_transcript_with_xai( # Capture usage data
                     transcript_segments,

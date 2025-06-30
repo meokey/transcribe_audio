@@ -70,16 +70,22 @@ Please see the full [LICENSE](LICENSE) file for details.
     python -m venv .venv
     source .venv/bin/activate  # On Windows: `.venv\Scripts\activate`
     ```
-3.  Install the required Python packages.
-    Install the packages in Production environment:
-    ```bash
-    pip install -r requirements.txt
-    ```
-    In the development environment, install the packages using
+3.  Install the required Python packages for development:
     ```bash
     pip install -e .[dev]
     ```
-    *(Note: The script will attempt to install `tqdm`, `mutagen`, and `tinytag` automatically if they are not found, but installing dependencies via `pip` in a virtual environment is the recommended practice.)*
+    This command installs the project in "editable" mode and includes all development dependencies like `pytest`. For a production environment, you would typically use:
+    ```bash
+    pip install .
+    ```
+
+## Testing
+
+To run the automated tests, use `pytest`:
+
+```bash
+pytest
+```
 
 ## Setup
 
